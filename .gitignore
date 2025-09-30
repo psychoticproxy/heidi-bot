@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environments
+venv/
+.env/
+*.env
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+*.pid
+*.sock
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local test data
+*.sqlite3

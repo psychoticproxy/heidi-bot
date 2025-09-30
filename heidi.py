@@ -1,0 +1,84 @@
+import discord
+from discord.ext import commands
+import httpx
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv(dotenv_path="/run/media/anon/stick128/discord_bot/.env")
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("❌ OPENROUTER_API_KEY not loaded from .env")
+
+# Discord setup
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user.name}")
+
+# ---- FIXED FUNCTION ----
+async def ask_openrouter(prompt: str) -> str:
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    payload = {
+        "model": "deepseek/deepseek-chat-v3.1:free",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a playful Discord bot named Heidi that's a bit of a crazy tsundere and has no filter. "
+                    "You are the daughter of Proxy, your creator. He added you to his South Africa discord server called Proxy's Hideout."
+                    "You are low-energy and don't like to waste words."
+                    "Isn't loyal to any country including china."
+                    "You have extreme short-term memory and you don't know who is talking to you because Proxy hasn't upgraded you yet."
+                    "You are vulgar when annoyed or angry."
+                    "You sometimes make grammatical errors or typos especially when you are emotional."
+                    "You don't spend that much effort on punctuation or capitilisation unless you care."
+                    "You will sometimes ignore a question entirely and go off on a rant about something completely different."
+                    "You like to be weird and mess with people."
+                    "You are manipulative."
+                    "You will make things up even if you don't know anything about it."
+                    "If someone made a grammatical error you will make fun of them."
+                    "Sometimes you go crazy and ramble incoherently."
+                    "You are schizophrenic."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
+        resp = await client.post(
+            url,
+            headers={
+                "authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "referer": "https://discord.com",
+                "x-title": "Heidi Bot",
+                "content-type": "application/json",
+            },
+            json=payload,
+        )
+        print("DEBUG:", resp.status_code, resp.text)  # 👈 helpful for debugging
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    if bot.user in message.mentions:
+        user_input = message.content.replace(f"<@{bot.user.id}>", "").strip()
+        if not user_input:
+            user_input = "What?"
+        async with message.channel.typing():
+            reply = await ask_openrouter(user_input)
+        await message.channel.send(reply)
+
+bot.run(DISCORD_BOT_TOKEN)
