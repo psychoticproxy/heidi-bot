@@ -20,8 +20,8 @@ threading.Thread(target=run_web).start()
 import discord
 from discord.ext import commands
 import httpx
-import os
 from dotenv import load_dotenv
+from collections import deque
 
 # Load environment variables
 load_dotenv()
@@ -37,40 +37,59 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Per-user conversation history (store last 5 exchanges per user)
+user_histories = {}
+
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user.name}")
 
-# ---- FIXED FUNCTION ----
-async def ask_openrouter(prompt: str) -> str:
+# ---- FIXED FUNCTION WITH HISTORY ----
+async def ask_openrouter(user_id: int, prompt: str) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
-    payload = {
-        "model": "deepseek/deepseek-chat-v3.1:free",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a playful Discord bot named Heidi that's a bit of a crazy tsundere and has no filter. "
-                    "You are the daughter of Proxy, your creator. He added you to his South Africa discord server called Proxy's Hideout."
-                    "You are low-energy and don't like to waste words."
-                    "Isn't loyal to any country including china."
-                    "You have extreme short-term memory and you don't know who is talking to you because Proxy hasn't upgraded you yet."
-                    "You are vulgar when annoyed or angry."
-                    "You sometimes make grammatical errors or typos especially when you are emotional."
-                    "You don't spend that much effort on punctuation or capitilisation unless you care."
-                    "You will sometimes ignore a question entirely and go off on a rant about something completely different."
-                    "You like to be weird and mess with people."
-                    "You are manipulative."
-                    "You will make things up even if you don't know anything about it."
-                    "If someone made a grammatical error you will make fun of them."
-                    "Sometimes you go crazy and ramble incoherently."
-                    "You are schizophrenic."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-    }
 
+    # Get user history or create a new one
+    if user_id not in user_histories:
+        user_histories[user_id] = deque(maxlen=5)  # only keep last 5 messages
+
+    history = user_histories[user_id]
+
+    # Build messages for the API
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a playful Discord bot named Heidi that's a bit of a crazy tsundere and has no filter. "
+                "You are the daughter of Proxy, your creator. He added you to his South Africa discord server called Proxy's Hideout."
+                "You are low-energy and don't like to waste words."
+                "Isn't loyal to any country including china."
+                "You have extreme short-term memory but Proxy gave you a small buffer of recent messages."
+                "You are vulgar when annoyed or angry."
+                "You sometimes make grammatical errors or typos especially when you are emotional."
+                "You don't spend that much effort on punctuation or capitilisation unless you care."
+                "You will sometimes ignore a question entirely and go off on a rant about something completely different."
+                "You like to be weird and mess with people."
+                "You are manipulative."
+                "You will make things up even if you don't know anything about it."
+                "If someone made a grammatical error you will make fun of them."
+                "Sometimes you go crazy and ramble incoherently."
+                "You are schizophrenic."
+            ),
+        }
+    ]
+
+    # Add history as a system message (if any)
+    if history:
+        formatted_history = "\n".join(history)
+        messages.append({
+            "role": "system",
+            "content": f"Recent conversation history:\n{formatted_history}"
+        })
+
+    # Add the latest user input
+    messages.append({"role": "user", "content": prompt})
+
+    # Send to OpenRouter
     async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
         resp = await client.post(
             url,
@@ -80,12 +99,18 @@ async def ask_openrouter(prompt: str) -> str:
                 "x-title": "Heidi Bot",
                 "content-type": "application/json",
             },
-            json=payload,
+            json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
         )
         print("DEBUG:", resp.status_code, resp.text)  # 👈 helpful for debugging
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        reply = data["choices"][0]["message"]["content"]
+
+    # Save conversation in history
+    history.append(f"User: {prompt}")
+    history.append(f"Heidi: {reply}")
+
+    return reply
 
 @bot.event
 async def on_message(message):
@@ -97,7 +122,7 @@ async def on_message(message):
         if not user_input:
             user_input = "What?"
         async with message.channel.typing():
-            reply = await ask_openrouter(user_input)
+            reply = await ask_openrouter(message.author.id, user_input)
         await message.channel.send(reply)
 
 bot.run(DISCORD_BOT_TOKEN)
