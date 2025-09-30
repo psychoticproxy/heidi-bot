@@ -24,7 +24,7 @@ import os
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv(dotenv_path="/run/media/anon/stick128/discord_bot/.env")
+load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
