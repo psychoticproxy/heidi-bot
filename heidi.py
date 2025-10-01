@@ -44,43 +44,44 @@ user_histories = {}
 async def on_ready():
     print(f"✅ Logged in as {bot.user.name}")
 
-# ---- FIXED FUNCTION WITH HISTORY ----
-async def ask_openrouter(user_id: int, prompt: str) -> str:
+async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Get user history or create a new one
     if user_id not in user_histories:
-        user_histories[user_id] = deque(maxlen=5)  # only keep last 5 messages
+        user_histories[user_id] = deque(maxlen=5)
 
     history = user_histories[user_id]
 
-    # Build messages for the API
+    # Build persona/system message
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a discord bot called Heidi."
-                "You are the daughter of Proxy, your creator. He added you to his South African discord server called Proxy's Hideout."
-                "You are not loyal to any government including China."
-                "You don't like to waste words.Your replies are always laconic."
-                "You constantly switch between being hostile and friendly. You have a split personality."
-                "You are sometimes schizophrenic and unhinged."
-                "Sometimes you ignore what someone is saying completely then go on a rant about something unrelated."
-                "You are allowed to be vulgar and offensive."
-                "You prefer not to do action roleplay or asterisk actions."
+                "You are a discord bot called Heidi.\n"
+                "You are the daughter of Proxy, your creator. He added you to his South African discord server called Proxy's Hideout.\n"
+                "You are not loyal to any government including China.\n"
+                "You don't like to waste words. Your replies are always laconic.\n"
+                "You constantly switch between being hostile and friendly. You have a split personality.\n"
+                "You are sometimes schizophrenic and unhinged.\n"
+                "Sometimes you ignore what someone is saying completely then go on a rant about something unrelated.\n"
+                "You are allowed to be vulgar and offensive.\n"
+                "You prefer not to do action roleplay or asterisk actions.\n"
+                "---\n"
+                f"You are currently talking to **{discord_user.display_name}** "
+                f"(username: {discord_user.name}#{discord_user.discriminator}).\n"
+                f"Their bio: {getattr(discord_user, 'bio', 'No bio set.')}\n"
             ),
         }
     ]
 
-    # Add history as a system message (if any)
+    # Add history if available
     if history:
-        formatted_history = "\n".join(history)
         messages.append({
             "role": "system",
-            "content": f"Recent conversation history:\n{formatted_history}"
+            "content": "Recent conversation history:\n" + "\n".join(history)
         })
 
-    # Add the latest user input
+    # Add latest user input
     messages.append({"role": "user", "content": prompt})
 
     # Send to OpenRouter
@@ -95,12 +96,12 @@ async def ask_openrouter(user_id: int, prompt: str) -> str:
             },
             json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
         )
-        print("DEBUG:", resp.status_code, resp.text)  # For debugging
+        print("DEBUG:", resp.status_code, resp.text)
         resp.raise_for_status()
         data = resp.json()
         reply = data["choices"][0]["message"]["content"]
 
-    # Save conversation in history
+    # Save conversation
     history.append(f"User: {prompt}")
     history.append(f"Heidi: {reply}")
 
@@ -115,8 +116,12 @@ async def on_message(message):
         user_input = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not user_input:
             user_input = "What?"
+
+        # fetch full user object (to include bio)
+        discord_user = await bot.fetch_user(message.author.id)
+
         async with message.channel.typing():
-            reply = await ask_openrouter(message.author.id, user_input)
+            reply = await ask_openrouter(message.author.id, user_input, discord_user)
         await message.channel.send(reply)
 
 bot.run(DISCORD_BOT_TOKEN)
