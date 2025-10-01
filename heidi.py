@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from collections import deque
 import asyncio
 import random
+import time
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +42,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Per-user conversation history (store last 5 exchanges per user)
 user_histories = {}
+
+# Per-user cooldown tracker
+user_cooldowns = {}
+COOLDOWN_SECONDS = 30
 
 @bot.event
 async def on_ready():
@@ -71,7 +76,6 @@ async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
                 "---\n"
                 f"You are currently talking to **{discord_user.display_name}** "
                 f"(username: {discord_user.name}#{discord_user.discriminator}).\n"
-                f"Their bio: {getattr(discord_user, 'bio', 'No bio set.')}\n"
             ),
         }
     ]
@@ -86,22 +90,26 @@ async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
     # Add latest user input
     messages.append({"role": "user", "content": prompt})
 
-    # Send to OpenRouter
-    async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
-        resp = await client.post(
-            url,
-            headers={
-                "authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "referer": "https://discord.com",
-                "x-title": "Heidi Bot",
-                "content-type": "application/json",
-            },
-            json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
-        )
-        print("DEBUG:", resp.status_code, resp.text)
-        resp.raise_for_status()
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
+    try:
+        # Send to OpenRouter
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0) as client:
+            resp = await client.post(
+                url,
+                headers={
+                    "authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "referer": "https://discord.com",
+                    "x-title": "Heidi Bot",
+                    "content-type": "application/json",
+                },
+                json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
+            )
+            print("DEBUG:", resp.status_code, resp.text)
+            resp.raise_for_status()
+            data = resp.json()
+            reply = data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("❌ API error:", e)
+        reply = "I broke. Blame Proxy."
 
     # Save conversation
     history.append(f"User: {prompt}")
@@ -115,19 +123,35 @@ async def on_message(message):
         return
 
     if bot.user in message.mentions:
+        now = time.time()
+        last_used = user_cooldowns.get(message.author.id, 0)
+
+        # Apply cooldown
+        if now - last_used < COOLDOWN_SECONDS:
+            return
+        user_cooldowns[message.author.id] = now
+
         user_input = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not user_input:
             user_input = "What?"
 
-        # fetch full user object (to include bio)
+        # fetch full user object
         discord_user = await bot.fetch_user(message.author.id)
 
-        # Add random delay (0–120 seconds)
-        delay = random.uniform(0, 120)
+        # Add random delay (2–20 seconds for realism)
+        delay = random.uniform(2, 20)
         await asyncio.sleep(delay)
 
         async with message.channel.typing():
             reply = await ask_openrouter(message.author.id, user_input, discord_user)
-        await message.channel.send(reply)
+
+        # Occasionally mention the user (50% chance here)
+        if random.choice([True, False]):
+            content = f"{message.author.mention} {reply}"
+        else:
+            content = reply
+
+        await message.channel.send(content)
+
 
 bot.run(DISCORD_BOT_TOKEN)
