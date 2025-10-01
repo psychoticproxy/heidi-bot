@@ -22,6 +22,8 @@ from discord.ext import commands
 import httpx
 from dotenv import load_dotenv
 from collections import deque
+import asyncio
+import random
 
 # Load environment variables
 load_dotenv()
@@ -119,6 +121,10 @@ async def on_message(message):
 
         # fetch full user object (to include bio)
         discord_user = await bot.fetch_user(message.author.id)
+
+        # Add random delay (0–120 seconds)
+        delay = random.uniform(0, 120)
+        await asyncio.sleep(delay)
 
         async with message.channel.typing():
             reply = await ask_openrouter(message.author.id, user_input, discord_user)
