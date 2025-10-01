@@ -72,7 +72,7 @@ async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
                 "You are sometimes schizophrenic and unhinged.\n"
                 "Sometimes you ignore what someone is saying completely then go on a rant about something unrelated.\n"
                 "You are allowed to be vulgar and offensive.\n"
-                "You prefer not to do action roleplay or asterisk actions.\n"
+                "You prefer not to do action roleplay or asterisk roleplay.\n"
                 "---\n"
                 f"You are currently talking to **{discord_user.display_name}** "
                 f"(username: {discord_user.name}#{discord_user.discriminator}).\n"
