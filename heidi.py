@@ -64,8 +64,6 @@ async def message_worker():
             await channel.send(content)
         message_queue.task_done()
 
-asyncio.create_task(message_worker())
-
 # ------------------------
 # SQLite (async) setup
 # ------------------------
@@ -122,7 +120,13 @@ async def on_ready():
     await db.commit()
 
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
+
+    # start message worker
+    asyncio.create_task(message_worker())
+
+    # also start daily loop
     asyncio.create_task(daily_random_message())
+    
     print(f"✅ Logged in as {bot.user.name}")
 
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
