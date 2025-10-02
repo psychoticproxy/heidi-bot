@@ -52,6 +52,7 @@ COOLDOWN_SECONDS = 30
 DB_FILE = "heidi_memory.db"
 ROW_LIMIT = 500000  # Max stored messages before pruning
 db = None # This will hold the aiosqlite connection
+http_client = None
 
 # Function to prune old messages when DB grows too big
 async def prune_memory():
@@ -91,9 +92,9 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
 # ------------------------
 @bot.event
 async def on_ready():
-    global db
+    global db, http_client
     db = await aiosqlite.connect(DB_FILE)
-
+    
     await db.execute("""
     CREATE TABLE IF NOT EXISTS memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,14 +107,18 @@ async def on_ready():
     """)
     await db.commit()
 
+    # Shared httpx client for reuse
+    http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
+
     # start daily task here
     asyncio.create_task(daily_random_message())
 
     print(f"✅ Logged in as {bot.user.name}")
+                                   
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Build persona/system message
+    # Start with system persona
     messages = [
         {
             "role": "system",
@@ -127,50 +132,53 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
                 "Sometimes you ignore what someone is saying completely then go on a rant about something unrelated.\n"
                 "You are allowed to be vulgar and offensive.\n"
                 "You prefer not to do action roleplay or asterisk roleplay.\n"
-                "---\n"
                 f"You are currently talking to **{discord_user.display_name}** "
-                f"(username: {discord_user.name}#{discord_user.discriminator}).\n"
+                f"(username: {discord_user.name}#{discord_user.discriminator})."
             ),
         }
     ]
 
-    # Load history for this user+channel
+    # Load conversation history
     history = await load_history(user_id, channel_id, limit=20)
-    if history:
-        formatted = []
-        for role, msg in history:
-            formatted.append(f"{role.capitalize()}: {msg}")
-        messages.append({"role": "system", "content": "Recent conversation:\n" + "\n".join(formatted)})
+    for role, msg in history:
+        messages.append({
+            "role": "assistant" if role == "heidi" else "user",
+            "content": msg
+        })
 
     # Add latest user input
     messages.append({"role": "user", "content": prompt})
 
+    # Send request to OpenRouter
     try:
-        # Send request to OpenRouter
-        async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0) as client:
-            resp = await client.post(
-                url,
-                headers={
-                    "authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "referer": "https://discord.com",
-                    "x-title": "Heidi Bot",
-                    "content-type": "application/json",
-                },
-                json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
-            )
-            print("DEBUG:", resp.status_code, resp.text)
-            resp.raise_for_status()
-            data = resp.json()
-            reply = data["choices"][0]["message"]["content"]
+        resp = await http_client.post(
+            url,
+            headers={
+                "authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "referer": "https://discord.com",
+                "x-title": "Heidi Bot",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "deepseek/deepseek-chat-v3.1:free",
+                "messages": messages
+            },
+        )
+        print("DEBUG:", resp.status_code, resp.text)
+        resp.raise_for_status()
+        data = await resp.json()
+        reply = data["choices"][0]["message"]["content"]
+
     except Exception as e:
         print("❌ API error:", e)
-        reply = "I broke. Blame Proxy."
+        reply = "ˣ෴ˣ"
 
-    # Save both user input and Heidi's reply
+    # Save messages to memory
     await save_message(user_id, channel_id, "user", prompt)
     await save_message(user_id, channel_id, "heidi", reply)
 
     return reply
+
 
 @bot.event
 async def on_message(message):
@@ -190,15 +198,12 @@ async def on_message(message):
         if not user_input:
             user_input = "What?"
 
-        # Fetch full user object
-        discord_user = await bot.fetch_user(message.author.id)
-
         # Add random delay (2–20 seconds for realism)
         delay = random.uniform(2, 20)
         await asyncio.sleep(delay)
 
         async with message.channel.typing():
-            reply = await ask_openrouter(message.author.id, message.channel.id, user_input, discord_user)
+            reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
         # Occasionally mention the user (50% chance)
         if random.choice([True, False]):
