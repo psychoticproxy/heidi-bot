@@ -1,10 +1,18 @@
 import threading
 from flask import Flask
 import os
+import discord
+from discord.ext import commands
+import httpx
+from dotenv import load_dotenv
+import asyncio
+import random
+import time
+import sqlite3
 
-# ----------------------------
-# Dummy web server (keeps Koyeb deployment alive)
-# ----------------------------
+# ------------------------
+# Dummy web server for Koyeb
+# ------------------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -15,25 +23,11 @@ def run_web():
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
 
-# Start dummy web server in background
 threading.Thread(target=run_web).start()
 
-# ----------------------------
-# Discord + API imports
-# ----------------------------
-import discord
-from discord.ext import commands
-import httpx
-from dotenv import load_dotenv
-import asyncio
-import random
-import time
-import sqlite3
-import atexit
-
-# ----------------------------
-# Load environment variables
-# ----------------------------
+# ------------------------
+# Environment setup
+# ------------------------
 load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -41,17 +35,33 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not OPENROUTER_API_KEY:
     raise ValueError("❌ OPENROUTER_API_KEY not loaded from .env")
 
-# ----------------------------
-# SQLite setup (long-term memory)
-# ----------------------------
+# ------------------------
+# Discord bot setup
+# ------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Cooldown tracking
+user_cooldowns = {}
+COOLDOWN_SECONDS = 30
+
+# ------------------------
+# SQLite setup
+# ------------------------
 DB_FILE = "heidi_memory.db"
+ROW_LIMIT = 500000  # Max stored messages before pruning
+
+# Connect to SQLite (creates file if missing)
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cursor = conn.cursor()
 
-# Create table if it doesn't exist
+# Create table for memory (per user, per channel)
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS conversations (
-    user_id INTEGER,
+CREATE TABLE IF NOT EXISTS memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    channel_id TEXT,
     role TEXT,
     message TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -59,50 +69,47 @@ CREATE TABLE IF NOT EXISTS conversations (
 """)
 conn.commit()
 
-# Ensure DB closes properly when bot exits
-atexit.register(lambda: conn.close())
+# Function to prune old messages when DB grows too big
+def prune_memory():
+    cursor.execute("SELECT COUNT(*) FROM memory")
+    total = cursor.fetchone()[0]
+    if total > ROW_LIMIT:
+        # Delete oldest rows beyond the limit
+        to_delete = total - ROW_LIMIT
+        cursor.execute("DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)", (to_delete,))
+        conn.commit()
+        print(f"🗑️ Pruned {to_delete} old messages (kept {ROW_LIMIT}).")
 
-def save_message(user_id: int, role: str, message: str):
-    """Save a message into the SQLite DB"""
+# Function to save a message into memory
+def save_message(user_id: int, channel_id: int, role: str, message: str):
     cursor.execute(
-        "INSERT INTO conversations (user_id, role, message) VALUES (?, ?, ?)",
-        (user_id, role, message)
+        "INSERT INTO memory (user_id, channel_id, role, message) VALUES (?, ?, ?, ?)",
+        (str(user_id), str(channel_id), role, message)
     )
     conn.commit()
+    prune_memory()  # Auto-prune after each insert
 
-def load_history(user_id: int, limit: int = 10):
-    """Load the last N messages for a user from SQLite"""
+# Function to load recent conversation history
+def load_history(user_id: int, channel_id: int, limit: int = 20):
     cursor.execute(
-        "SELECT role, message FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-        (user_id, limit)
+        "SELECT role, message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT ?",
+        (str(user_id), str(channel_id), limit)
     )
     rows = cursor.fetchall()
-    # Reverse so oldest is first (important for conversation flow)
-    return list(reversed(rows))
+    # Reverse to chronological order
+    return rows[::-1]
 
-# ----------------------------
-# Discord bot setup
-# ----------------------------
-intents = discord.Intents.default()
-intents.message_content = True  # Needed to read message text
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Per-user cooldown tracker
-user_cooldowns = {}
-COOLDOWN_SECONDS = 30  # Prevent spam
-
+# ------------------------
+# Bot events
+# ------------------------
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user.name}")
 
-# ----------------------------
-# Function to ask OpenRouter API
-# ----------------------------
-async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
-    """Send conversation (with history) to OpenRouter and get Heidi's reply"""
+async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
 
-    # Build system prompt (Heidi's persona)
+    # Build persona/system message
     messages = [
         {
             "role": "system",
@@ -123,20 +130,19 @@ async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
         }
     ]
 
-    # Load last 10 messages from DB and inject into context
-    history = load_history(user_id, limit=10)
+    # Load history for this user+channel
+    history = load_history(user_id, channel_id, limit=20)
     if history:
-        messages.append({
-            "role": "system",
-            "content": "Recent conversation history:\n" +
-                       "\n".join([f"{role}: {msg}" for role, msg in history])
-        })
+        formatted = []
+        for role, msg in history:
+            formatted.append(f"{role.capitalize()}: {msg}")
+        messages.append({"role": "system", "content": "Recent conversation:\n" + "\n".join(formatted)})
 
     # Add latest user input
     messages.append({"role": "user", "content": prompt})
 
     try:
-        # Send to OpenRouter API
+        # Send request to OpenRouter
         async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0) as client:
             resp = await client.post(
                 url,
@@ -148,7 +154,7 @@ async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
                 },
                 json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
             )
-            print("DEBUG:", resp.status_code, resp.text[:200])  # log first 200 chars
+            print("DEBUG:", resp.status_code, resp.text)
             resp.raise_for_status()
             data = resp.json()
             reply = data["choices"][0]["message"]["content"]
@@ -156,22 +162,17 @@ async def ask_openrouter(user_id: int, prompt: str, discord_user) -> str:
         print("❌ API error:", e)
         reply = "I broke. Blame Proxy."
 
-    # Save conversation into DB
-    save_message(user_id, "User", prompt)
-    save_message(user_id, "Heidi", reply)
+    # Save both user input and Heidi's reply
+    save_message(user_id, channel_id, "user", prompt)
+    save_message(user_id, channel_id, "heidi", reply)
 
     return reply
 
-# ----------------------------
-# Handle Discord messages
-# ----------------------------
 @bot.event
 async def on_message(message):
-    # Ignore own messages
     if message.author == bot.user:
         return
 
-    # Only respond when Heidi is mentioned
     if bot.user in message.mentions:
         now = time.time()
         last_used = user_cooldowns.get(message.author.id, 0)
@@ -181,20 +182,19 @@ async def on_message(message):
             return
         user_cooldowns[message.author.id] = now
 
-        # Extract the text after mentioning Heidi
         user_input = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if not user_input:
             user_input = "What?"
 
-        # Get full user object (to access display name)
+        # Fetch full user object
         discord_user = await bot.fetch_user(message.author.id)
 
-        # Random delay for realism (2–20s)
+        # Add random delay (2–20 seconds for realism)
         delay = random.uniform(2, 20)
         await asyncio.sleep(delay)
 
         async with message.channel.typing():
-            reply = await ask_openrouter(message.author.id, user_input, discord_user)
+            reply = await ask_openrouter(message.author.id, message.channel.id, user_input, discord_user)
 
         # Occasionally mention the user (50% chance)
         if random.choice([True, False]):
@@ -204,7 +204,7 @@ async def on_message(message):
 
         await message.channel.send(content)
 
-# ----------------------------
-# Run the bot
-# ----------------------------
+# ------------------------
+# Run bot
+# ------------------------
 bot.run(DISCORD_BOT_TOKEN)
