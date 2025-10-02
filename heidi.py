@@ -45,6 +45,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 user_cooldowns = {}
 COOLDOWN_SECONDS = 30
 
+# -------------------------------------------
+# --- Helper to safely send long messages ---
+# -------------------------------------------
+async def safe_send(channel, content, max_len=2000):
+    """Splits content into chunks so Discord doesn't reject it."""
+    for i in range(0, len(content), max_len):
+        chunk = content[i:i+max_len]
+        await channel.send(chunk)
+
 # ------------------------
 # Async message queue
 # ------------------------
@@ -57,11 +66,11 @@ async def message_worker():
             if typing:
                 async with channel.typing():
                     await asyncio.sleep(min(len(content) * 0.05, 5))  # simulate typing duration
-            await channel.send(content)
+            await safe_send(channel, content)
         except discord.errors.HTTPException as e:
             print("⚠️ Discord rate limit / HTTP error:", e)
             await asyncio.sleep(5)  # simple retry delay
-            await channel.send(content)
+            await safe_send(channel, content)
         message_queue.task_done()
 
 # ------------------------
@@ -133,10 +142,11 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     url = "https://openrouter.ai/api/v1/chat/completions"
     messages = [
         {
-            "role": "assistant",
+            "role": "assistant", # persona
             "content": (
                 f"I am discord bot Heidi. Talking to {discord_user.display_name} ({discord_user.name}#{discord_user.discriminator}).\n"
-                "I am laconic, sometimes unhinged, sometimes offensive, with split personality.\n"
+                "I am laconic, sometimes unhinged, sometimes offensive, with split personality. Sometimes I ignore what was asked and go on a rant about something else completely different.\n"
+                "IMPORTANT: Never exceed 2000 characters in a single reply. If more is needed, stop and continue in the next message."
             )
         }
     ]
