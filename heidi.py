@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import asyncio
 import random
 import time
-import sqlite3
+import aiosqlite
 
 # ------------------------
 # Dummy web server for Koyeb
@@ -47,65 +47,69 @@ user_cooldowns = {}
 COOLDOWN_SECONDS = 30
 
 # ------------------------
-# SQLite setup
+# SQLite (async) setup
 # ------------------------
 DB_FILE = "heidi_memory.db"
 ROW_LIMIT = 500000  # Max stored messages before pruning
-
-# Connect to SQLite (creates file if missing)
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cursor = conn.cursor()
-
-# Create table for memory (per user, per channel)
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS memory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    channel_id TEXT,
-    role TEXT,
-    message TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-conn.commit()
+db = None # This will hold the aiosqlite connection
 
 # Function to prune old messages when DB grows too big
-def prune_memory():
-    cursor.execute("SELECT COUNT(*) FROM memory")
-    total = cursor.fetchone()[0]
+async def prune_memory():
+    async with db.execute("SELECT COUNT(*) FROM memory") as cursor:
+        total = (await cursor.fetchone())[0]
+
     if total > ROW_LIMIT:
-        # Delete oldest rows beyond the limit
         to_delete = total - ROW_LIMIT
-        cursor.execute("DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)", (to_delete,))
-        conn.commit()
+        await db.execute(
+            "DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)",
+            (to_delete,)
+        )
+        await db.commit()
         print(f"🗑️ Pruned {to_delete} old messages (kept {ROW_LIMIT}).")
 
 # Function to save a message into memory
-def save_message(user_id: int, channel_id: int, role: str, message: str):
-    cursor.execute(
+async def save_message(user_id: int, channel_id: int, role: str, message: str):
+    await db.execute(
         "INSERT INTO memory (user_id, channel_id, role, message) VALUES (?, ?, ?, ?)",
         (str(user_id), str(channel_id), role, message)
     )
-    conn.commit()
-    prune_memory()  # Auto-prune after each insert
+    await db.commit()
+    await prune_memory() # Auto-prune after each insert
 
 # Function to load recent conversation history
-def load_history(user_id: int, channel_id: int, limit: int = 20):
-    cursor.execute(
+async def load_history(user_id: int, channel_id: int, limit: int = 20):
+    async with db.execute(
         "SELECT role, message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT ?",
         (str(user_id), str(channel_id), limit)
-    )
-    rows = cursor.fetchall()
-    # Reverse to chronological order
-    return rows[::-1]
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    return rows[::-1] # Reverse to chronological
 
 # ------------------------
 # Bot events
 # ------------------------
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user.name}")
+    global db
+    db = await aiosqlite.connect(DB_FILE)
 
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        channel_id TEXT,
+        role TEXT,
+        message TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    await db.commit()
+
+    # start daily task here
+    asyncio.create_task(daily_random_message())
+
+    print(f"✅ Logged in as {bot.user.name}")
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -131,7 +135,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     ]
 
     # Load history for this user+channel
-    history = load_history(user_id, channel_id, limit=20)
+    history = await load_history(user_id, channel_id, limit=20)
     if history:
         formatted = []
         for role, msg in history:
@@ -163,8 +167,8 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         reply = "I broke. Blame Proxy."
 
     # Save both user input and Heidi's reply
-    save_message(user_id, channel_id, "user", prompt)
-    save_message(user_id, channel_id, "heidi", reply)
+    await save_message(user_id, channel_id, "user", prompt)
+    await save_message(user_id, channel_id, "heidi", reply)
 
     return reply
 
@@ -259,9 +263,6 @@ async def daily_random_message():
         except Exception as e:
             print("❌ Error in daily message loop:", e)
             await asyncio.sleep(3600)  # wait 1 hour before retrying
-
-# Start the task
-bot.loop.create_task(daily_random_message())
 
 # ------------------------
 # Run bot
