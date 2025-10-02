@@ -1,4 +1,5 @@
 discord.py
-python-dotenv
-httpx
+aiosqlite
 flask
+httpx
+python-dotenv
