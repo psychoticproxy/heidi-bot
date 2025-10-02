@@ -203,6 +203,65 @@ async def on_message(message):
             content = reply
 
         await message.channel.send(content)
+        
+# ------------------------
+# Daily random message feature
+# ------------------------
+ROLE_ID = 1415601057328926733  # The role to pick users from
+CHANNEL_ID = 1385570983062278268  # The channel to send messages in
+
+async def daily_random_message():
+    await bot.wait_until_ready()
+    print("🕒 Daily message loop started.")
+
+    while not bot.is_closed():
+        try:
+            # Wait a random time within 24 hours (0–86400 seconds)
+            delay = random.randint(0, 86400)
+            print(f"⏰ Next random message in {delay/3600:.2f} hours.")
+            await asyncio.sleep(delay)
+
+            # Pick random guild (assuming bot is in only one)
+            if not bot.guilds:
+                print("⚠️ No guilds found.")
+                continue
+            guild = bot.guilds[0]
+
+            # Get channel and role
+            channel = guild.get_channel(CHANNEL_ID)
+            role = guild.get_role(ROLE_ID)
+            if not channel or not role:
+                print("⚠️ Channel or role not found.")
+                continue
+
+            # Get members with the role
+            members = [m for m in role.members if not m.bot]
+            if not members:
+                print("⚠️ No eligible members found.")
+                continue
+
+            # Pick one random member
+            target_user = random.choice(members)
+
+            # Generate message with OpenRouter API
+            prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
+            reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
+
+            # Send message in the channel, occasionally mentioning them
+            if random.choice([True, False]):
+                content = f"{target_user.mention} {reply}"
+            else:
+                content = reply
+
+            await channel.send(content)
+            print(f"💬 Sent daily message to {target_user.display_name}")
+
+        except Exception as e:
+            print("❌ Error in daily message loop:", e)
+            await asyncio.sleep(3600)  # wait 1 hour before retrying
+
+# Start the task
+bot.loop.create_task(daily_random_message())
 
 # ------------------------
 # Run bot
