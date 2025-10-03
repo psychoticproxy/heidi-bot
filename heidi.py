@@ -322,9 +322,12 @@ async def on_message(message):
 
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
-        content = f"{message.author.mention} {reply}" if random.choice([True, False]) else reply
-        typing = random.random() < 0.8
-        await message_queue.put((message.channel, content, typing))
+        if reply: # only enqeue if we got a real reply
+            content = f"{message.author.mention} {reply}" if random.choice([True, False]) else reply
+            typing = random.random() < 0.8
+            await message_queue.put((message.channel, content, typing))
+        else:
+            print("⚠️ Skipped enqueuing because reply was None (retry_worker will handle it).")
 
 # ------------------------
 # Manual reflection command
