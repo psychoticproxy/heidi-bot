@@ -9,6 +9,15 @@ import asyncio
 import random
 import time
 import aiosqlite
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+log = logging.getLogger("heidi")
 
 # ------------------------
 # Dummy web server for Koyeb
@@ -69,7 +78,7 @@ async def message_worker():
                     await asyncio.sleep(min(len(content) * 0.05, 5))  # simulate typing duration
             await safe_send(channel, content)
         except discord.errors.HTTPException as e:
-            print("⚠️ Discord rate limit / HTTP error:", e)
+            log.warning("⚠️ Discord rate limit / HTTP error:", exc_info e)
             await asyncio.sleep(5)  # simple retry delay
             await safe_send(channel, content)
         message_queue.task_done()
@@ -93,7 +102,7 @@ async def retry_worker():
                         await message_queue.put((channel, reply, typing))
                     success = True  # ✅ stop retrying
             except Exception as e:
-                print("⚠️ Retry failed, will try again:", e)
+                log.warning("⚠️ Retry failed, will try again:", exc_info=e)
 
             if not success:
                 await asyncio.sleep(delay)
@@ -120,7 +129,7 @@ async def prune_memory():
             (to_delete,)
         )
         await db.commit()
-        print(f"🗑️ Pruned {to_delete} old messages (kept {ROW_LIMIT}).")
+        log.info(f"🗑️ Pruned {to_delete} old messages (kept {ROW_LIMIT}).")
 
 async def save_message(user_id: int, channel_id: int, role: str, message: str):
     await db.execute(
@@ -204,12 +213,12 @@ Output only the new persona text, nothing else.
 
         if new_persona:
             await set_persona(new_persona)
-            print("✨ Persona updated successfully.")
+            log.info("✨ Persona updated successfully.")
         else:
-            print("Reflection returned empty persona, skipping.")
+            log.info("Reflection returned empty persona, skipping.")
 
     except Exception as e:
-        print(f"❌ Error during persona reflection: {e}")
+        log.error(f"❌ Error during persona reflection: {e}")
 
 # ------------------------
 # Bot events
@@ -257,7 +266,7 @@ async def on_ready():
             await asyncio.sleep(3600)  # every hour
     asyncio.create_task(periodic_reflection())
 
-    print(f"✅ Logged in as {bot.user.name}")
+    log.info("✅ Logged in as %s", bot.user.name)
 
 # ------------------------
 # Ask OpenRouter
@@ -293,7 +302,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         data = resp.json()
         reply = data["choices"][0]["message"]["content"]
     except Exception as e:
-        print("❌ API error:", e)
+        log.error("❌ API error:", e)
         await retry_queue.put((user_id, channel_id, prompt, discord_user))
         return None
 
@@ -327,7 +336,7 @@ async def on_message(message):
             typing = random.random() < 0.8
             await message_queue.put((message.channel, content, typing))
         else:
-            print("⚠️ Skipped enqueuing because reply was None (retry_worker will handle it).")
+            log.info("⚠️ Skipped enqueuing because reply was None (retry_worker will handle it).")
 
 # ------------------------
 # Manual reflection command
@@ -346,7 +355,7 @@ CHANNEL_ID = 1385570983062278268
 
 async def daily_random_message():
     await bot.wait_until_ready()
-    print("🕒 Daily message loop started.")
+    log.info("🕒 Daily message loop started.")
     while not bot.is_closed():
         try:
             delay = random.randint(0, 86400)
@@ -367,9 +376,9 @@ async def daily_random_message():
             content = f"{target_user.mention} {reply}" if random.choice([True, False]) else reply
             typing = random.random() < 0.8
             await message_queue.put((channel, content, typing))
-            print(f"💬 Sent daily message to {target_user.display_name}")
+            log.info(f"💬 Sent daily message to {target_user.display_name}")
         except Exception as e:
-            print("❌ Error in daily message loop:", e)
+            log.error("❌ Error in daily message loop:", e)
             await asyncio.sleep(3600)
 
 # ------------------------
