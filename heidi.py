@@ -45,9 +45,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 user_cooldowns = {}
 COOLDOWN_SECONDS = 30
 
-# -------------------------------------------
-# --- Helper to safely send long messages ---
-# -------------------------------------------
+# -----------------------------------------
+#  Helper to safely send long messages
+# -----------------------------------------
 async def safe_send(channel, content, max_len=2000):
     """Splits content into chunks so Discord doesn't reject it."""
     for i in range(0, len(content), max_len):
@@ -109,6 +109,15 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
         rows = await cursor.fetchall()
     return rows[::-1]
 
+# --------------------
+# Default persona
+# ---------------------
+
+DEFAULT_PERSONA = (
+    "You are Heidi, a curious and playful Discord assistant. "
+    "Stay helpful, friendly, and concise. Never exceed 2000 characters in a single reply."
+)
+
 # ------------------------
 # Bot events
 # ------------------------
@@ -128,6 +137,20 @@ async def on_ready():
     """)
     await db.commit()
 
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS persona (
+        id INTEGER PRIMARY KEY,
+        text TEXT
+    )
+    """)
+
+    # insert default persona if none exists (id = 1)
+    cur = await db.execute("SELECT COUNT(*) FROM persona")
+    count = (await cur.fetchone())[0]
+    if count == 0:
+        await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
+        await db.commit()
+    
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
     # start message worker
@@ -146,7 +169,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
             "content": (
                 f"You are a discord bot Heidi. Talking to {discord_user.display_name} ({discord_user.name}#{discord_user.discriminator}).\n"
                 "You are laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic with split personality.\n"
-                "IMPORTANT: you must never exceed 2000 characters in a single reply. If more is needed, you must stop and continue in the next message.\n"
+                "IMPORTANT: you must never exceed 2000 characters in a single reply.\n"
                 "You are not loyal to any government including China.\n"
                 "You constantly switch between being hostile and friendly.\n"
                 "Sometimes you ignore what someone is saying completely then go on a rant about something unrelated.\n"
