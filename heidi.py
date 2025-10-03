@@ -72,42 +72,71 @@ retry_queue = asyncio.Queue()
 async def message_worker():
     while True:
         channel, content, typing = await message_queue.get()
+
+        # Defensive guard: skip empty content
+        if not content:
+            log.warning("⚠️ Skipping empty content in message_queue")
+            message_queue.task_done()
+            continue
+
         try:
             if typing:
+                # use typing context manager; this doesn't block other tasks
                 async with channel.typing():
                     await asyncio.sleep(min(len(content) * 0.05, 5))  # simulate typing duration
             await safe_send(channel, content)
         except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord rate limit / HTTP error:")
+            log.warning("⚠️ Discord rate limit / HTTP error; retrying send", exc_info=e)
             await asyncio.sleep(5)  # simple retry delay
-            await safe_send(channel, content)
-        message_queue.task_done()
+            try:
+                await safe_send(channel, content)
+            except Exception as e2:
+                log.error("Failed to send message after retry", exc_info=e2)
+        finally:
+            message_queue.task_done()
 
 #--------------------
 # Retry worker
 #--------------------
 async def retry_worker():
+    """
+    Continuously processes retry_queue. For each failed request it will
+    keep trying until it gets a reply (infinite retries), using exponential
+    backoff (capped) so we don't hammer the API.
+    """
+    await bot.wait_until_ready()
     while True:
         user_id, channel_id, prompt, discord_user = await retry_queue.get()
-        success = False
-        delay = 10  # start with 10s delay
+        delay = 10  # initial retry delay (seconds)
+        max_delay = 300  # 5 minutes max
 
-        while not success:
+        log.info("🔁 Starting retries for user=%s channel=%s prompt=%.40s...", user_id, channel_id, prompt)
+        while True:
             try:
-                reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
+                # call ask_openrouter but DON'T allow it to re-enqueue on failure,
+                # retry_worker will handle the backoff and reattempts.
+                reply = await ask_openrouter(user_id, channel_id, prompt, discord_user, allow_enqueue=False)
                 if reply:
                     channel = bot.get_channel(int(channel_id))
                     if channel:
+                        content = f"{discord_user.mention} {reply}" if random.choice([True, False]) else reply
                         typing = random.random() < 0.8
-                        await message_queue.put((channel, reply, typing))
-                    success = True  # ✅ stop retrying
-            except Exception as e:
-                log.warning("⚠️ Retry failed, will try again:")
+                        await message_queue.put((channel, content, typing))
+                        log.info("✅ Retry successful for user=%s channel=%s", user_id, channel_id)
+                    else:
+                        log.warning("⚠️ Could not find channel %s to deliver retry reply", channel_id)
+                    break  # success -> stop retrying this job
+                else:
+                    # no reply returned (likely API still rate-limiting) -> wait then try again
+                    log.info("⚠️ No reply yet; will retry after %s seconds", delay)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, max_delay)
 
-            if not success:
+            except Exception as e:
+                # Unexpected exception while retrying: log and back off
+                log.warning("⚠️ Retry attempt raised exception; will try again", exc_info=e)
                 await asyncio.sleep(delay)
-                # optional: exponential backoff, up to 5min max
-                delay = min(delay * 2, 300)
+                delay = min(delay * 2, max_delay)
 
         retry_queue.task_done()
 
@@ -129,7 +158,7 @@ async def prune_memory():
             (to_delete,)
         )
         await db.commit()
-        log.info(f"🗑️ Pruned {to_delete} old messages (kept {ROW_LIMIT}).")
+        log.info("🗑️ Pruned %d old messages (kept %d).", to_delete, ROW_LIMIT)
 
 async def save_message(user_id: int, channel_id: int, role: str, message: str):
     await db.execute(
@@ -200,7 +229,7 @@ Output only the new persona text, nothing else.
                     "X-Title": "Heidi Discord Bot",
                 },
                 json={
-                    "model": "deepseek/deepseek-chat-v3.1:free",  # can swap to your preferred model
+                    "model": "deepseek/deepseek-chat-v3.1:free",
                     "messages": [
                         {"role": "system", "content": "You are a helpful assistant."},
                         {"role": "user", "content": reflection_prompt},
@@ -208,6 +237,16 @@ Output only the new persona text, nothing else.
                 },
                 timeout=60.0,
             )
+
+            # handle rate limiting gracefully here as well
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                wait_time = int(retry_after) if retry_after and retry_after.isdigit() else 30
+                log.warning("⚠️ Persona reflection rate-limited. Waiting %s seconds.", wait_time)
+                await asyncio.sleep(wait_time)
+                # we could re-run, but let's just skip and let the scheduled loop call it again later
+                return
+
             data = resp.json()
             new_persona = data["choices"][0]["message"]["content"].strip()
 
@@ -218,7 +257,7 @@ Output only the new persona text, nothing else.
             log.info("Reflection returned empty persona, skipping.")
 
     except Exception as e:
-        log.error(f"❌ Error during persona reflection: {e}")
+        log.exception("❌ Error during persona reflection")
 
 # ------------------------
 # Bot events
@@ -271,7 +310,14 @@ async def on_ready():
 # ------------------------
 # Ask OpenRouter
 # ------------------------
-async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
+async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user, allow_enqueue: bool = True) -> str:
+    """
+    Attempt to call OpenRouter once.
+    - If success: returns reply string.
+    - If rate-limited (429) or other error:
+        - if allow_enqueue is True: enqueue the request for retry_worker and return None
+        - if allow_enqueue is False: just return None (caller will handle retry/backoff)
+    """
     url = "https://openrouter.ai/api/v1/chat/completions"
 
     persona = await get_persona()
@@ -298,16 +344,50 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
             },
             json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
         )
+
+        # If rate limited, do not hammer the API. Let retry_worker handle reattempts.
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            wait_time = None
+            if retry_after and retry_after.isdigit():
+                wait_time = int(retry_after)
+
+            if wait_time:
+                log.warning("⚠️ OpenRouter returned 429. Retry-After=%s seconds.", wait_time)
+            else:
+                log.warning("⚠️ OpenRouter returned 429. No Retry-After header present.")
+
+            if allow_enqueue:
+                # hand off to retry worker (which will perform backoff)
+                await retry_queue.put((user_id, channel_id, prompt, discord_user))
+                log.info("🔁 Enqueued request for later retry (user=%s channel=%s).", user_id, channel_id)
+            return None
+
+        # If other errors, raise so the except below handles them
         resp.raise_for_status()
+
         data = resp.json()
+        # Be defensive - ensure structure is present
         reply = data["choices"][0]["message"]["content"]
+
+    except httpx.HTTPStatusError as e:
+        log.exception("❌ API HTTP error when calling OpenRouter")
+        if allow_enqueue:
+            await retry_queue.put((user_id, channel_id, prompt, discord_user))
+        return None
     except Exception as e:
-        log.error("❌ API error:", e)
-        await retry_queue.put((user_id, channel_id, prompt, discord_user))
+        log.exception("❌ API error when calling OpenRouter")
+        if allow_enqueue:
+            await retry_queue.put((user_id, channel_id, prompt, discord_user))
         return None
 
-    await save_message(user_id, channel_id, "user", prompt)
-    await save_message(user_id, channel_id, "heidi", reply)
+    # Save into memory and return
+    try:
+        await save_message(user_id, channel_id, "user", prompt)
+        await save_message(user_id, channel_id, "heidi", reply)
+    except Exception:
+        log.exception("Failed to save messages to DB (non-fatal)")
+
     return reply
 
 # ------------------------
@@ -329,14 +409,15 @@ async def on_message(message):
         delay = random.uniform(2, 20)
         await asyncio.sleep(delay)
 
+        # note: ask_openrouter will enqueue into retry_queue if the API is rate-limiting
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
-        if reply: # only enqeue if we got a real reply
+        if reply:  # only enqueue if we got a real reply
             content = f"{message.author.mention} {reply}" if random.choice([True, False]) else reply
             typing = random.random() < 0.8
             await message_queue.put((message.channel, content, typing))
         else:
-            log.info("⚠️ Skipped enqueuing because reply was None (retry_worker will handle it).")
+            log.info("⚠️ Skipped enqueuing because reply was None (it was enqueued for retry).")
 
 # ------------------------
 # Manual reflection command
@@ -372,13 +453,17 @@ async def daily_random_message():
 
             target_user = random.choice(members)
             prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
+            # use allow_enqueue=True here (default) so the job is enqueued if rate-limited
             reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
-            content = f"{target_user.mention} {reply}" if random.choice([True, False]) else reply
-            typing = random.random() < 0.8
-            await message_queue.put((channel, content, typing))
-            log.info(f"💬 Sent daily message to {target_user.display_name}")
+            if reply:
+                content = f"{target_user.mention} {reply}" if random.choice([True, False]) else reply
+                typing = random.random() < 0.8
+                await message_queue.put((channel, content, typing))
+                log.info("💬 Sent daily message to %s", target_user.display_name)
+            else:
+                log.info("⚠️ Daily random message enqueued for retry due to rate limit or error.")
         except Exception as e:
-            log.error("❌ Error in daily message loop:", e)
+            log.exception("❌ Error in daily message loop (sleeping 1h)")
             await asyncio.sleep(3600)
 
 # ------------------------
