@@ -78,7 +78,7 @@ async def message_worker():
                     await asyncio.sleep(min(len(content) * 0.05, 5))  # simulate typing duration
             await safe_send(channel, content)
         except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord rate limit / HTTP error:", exc_info e)
+            log.warning("⚠️ Discord rate limit / HTTP error:")
             await asyncio.sleep(5)  # simple retry delay
             await safe_send(channel, content)
         message_queue.task_done()
@@ -102,7 +102,7 @@ async def retry_worker():
                         await message_queue.put((channel, reply, typing))
                     success = True  # ✅ stop retrying
             except Exception as e:
-                log.warning("⚠️ Retry failed, will try again:", exc_info=e)
+                log.warning("⚠️ Retry failed, will try again:")
 
             if not success:
                 await asyncio.sleep(delay)
