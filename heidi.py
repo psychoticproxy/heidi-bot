@@ -58,6 +58,7 @@ async def safe_send(channel, content, max_len=2000):
 # Async message queue
 # ------------------------
 message_queue = asyncio.Queue()
+retry_queue = asyncio.Queue()
 
 async def message_worker():
     while True:
@@ -72,6 +73,34 @@ async def message_worker():
             await asyncio.sleep(5)  # simple retry delay
             await safe_send(channel, content)
         message_queue.task_done()
+
+#--------------------
+# Retry worker
+#--------------------
+async def retry_worker():
+    while True:
+        user_id, channel_id, prompt, discord_user = await retry_queue.get()
+        success = False
+        delay = 10  # start with 10s delay
+
+        while not success:
+            try:
+                reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
+                if reply:
+                    channel = bot.get_channel(int(channel_id))
+                    if channel:
+                        typing = random.random() < 0.8
+                        await message_queue.put((channel, reply, typing))
+                    success = True  # ✅ stop retrying
+            except Exception as e:
+                print("⚠️ Retry failed, will try again:", e)
+
+            if not success:
+                await asyncio.sleep(delay)
+                # optional: exponential backoff, up to 5min max
+                delay = min(delay * 2, 300)
+
+        retry_queue.task_done()
 
 # ------------------------
 # SQLite (async) setup
@@ -218,6 +247,7 @@ async def on_ready():
     # start workers
     asyncio.create_task(message_worker())
     asyncio.create_task(daily_random_message())
+    asyncio.create_task(retry_worker())
 
     # persona reflection loop
     async def periodic_reflection():
@@ -264,7 +294,8 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         reply = data["choices"][0]["message"]["content"]
     except Exception as e:
         print("❌ API error:", e)
-        reply = "ˣ෴ˣ"
+        await retry_queue.put((user_id, channel_id, prompt, discord_user))
+        return None
 
     await save_message(user_id, channel_id, "user", prompt)
     await save_message(user_id, channel_id, "heidi", reply)
