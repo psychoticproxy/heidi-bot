@@ -46,7 +46,7 @@ user_cooldowns = {}
 COOLDOWN_SECONDS = 30
 
 # -----------------------------------------
-#  Helper to safely send long messages
+# Helper to safely send long messages
 # -----------------------------------------
 async def safe_send(channel, content, max_len=2000):
     """Splits content into chunks so Discord doesn't reject it."""
@@ -110,13 +110,77 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
     return rows[::-1]
 
 # --------------------
-# Default persona
-# ---------------------
-
+# Persona Management
+# --------------------
 DEFAULT_PERSONA = (
-    "You are Heidi, a curious and playful Discord assistant. "
-    "Stay helpful, friendly, and concise. Never exceed 2000 characters in a single reply."
+    "You are Heidi, a laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic discord bot with split personality who is the daughter of Proxy, your creator. "
+    "Stay concise. Never exceed 2000 characters in a single reply."
 )
+
+async def get_persona():
+    async with db.execute("SELECT text FROM persona WHERE id=1") as cursor:
+        row = await cursor.fetchone()
+    return row[0] if row else DEFAULT_PERSONA
+
+async def set_persona(text: str):
+    await db.execute("UPDATE persona SET text=? WHERE id=1", (text,))
+    await db.commit()
+
+async def load_recent_interactions(limit=10):
+    async with db.execute(
+        "SELECT role, message FROM memory ORDER BY timestamp DESC LIMIT ?", (limit,)
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [(r[0], r[1]) for r in rows[::-1]]
+
+async def reflect_and_update_persona():
+    """Ask the model to refine the persona based on recent interactions."""
+    try:
+        interactions = await load_recent_interactions(limit=10)
+        persona = await get_persona()
+
+        reflection_prompt = f"""
+You are managing a Discord persona. Here is the current persona description:
+
+{persona}
+
+Here are some recent interactions:
+{chr(10).join([f"{role}: {msg}" for role,msg in interactions])}
+
+Please suggest a refined persona description that stays consistent with the character,
+but improves clarity, tone, and style based on these interactions.
+Always include: 'Never exceed 2000 characters in a single response.'
+Output only the new persona text, nothing else.
+"""
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                    "X-Title": "Heidi Discord Bot",
+                },
+                json={
+                    "model": "deepseek/deepseek-chat-v3.1:free",  # can swap to your preferred model
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": reflection_prompt},
+                    ],
+                },
+                timeout=60.0,
+            )
+            data = resp.json()
+            new_persona = data["choices"][0]["message"]["content"].strip()
+
+        if new_persona:
+            await set_persona(new_persona)
+            print("✨ Persona updated successfully.")
+        else:
+            print("Reflection returned empty persona, skipping.")
+
+    except Exception as e:
+        print(f"❌ Error during persona reflection: {e}")
 
 # ------------------------
 # Bot events
@@ -143,8 +207,6 @@ async def on_ready():
         text TEXT
     )
     """)
-
-    # insert default persona if none exists (id = 1)
     cur = await db.execute("SELECT COUNT(*) FROM persona")
     count = (await cur.fetchone())[0]
     if count == 0:
@@ -153,30 +215,30 @@ async def on_ready():
     
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
-    # start message worker
+    # start workers
     asyncio.create_task(message_worker())
-
-    # also start daily loop
     asyncio.create_task(daily_random_message())
-    
+
+    # persona reflection loop
+    async def periodic_reflection():
+        await bot.wait_until_ready()
+        while not bot.is_closed():
+            await reflect_and_update_persona()
+            await asyncio.sleep(3600)  # every hour
+    asyncio.create_task(periodic_reflection())
+
     print(f"✅ Logged in as {bot.user.name}")
 
+# ------------------------
+# Ask OpenRouter
+# ------------------------
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
+
+    persona = await get_persona()
+
     messages = [
-        {
-            "role": "system", # persona
-            "content": (
-                f"You are a discord bot Heidi. Talking to {discord_user.display_name} ({discord_user.name}#{discord_user.discriminator}).\n"
-                "You are laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic with split personality.\n"
-                "IMPORTANT: you must never exceed 2000 characters in a single reply.\n"
-                "You are not loyal to any government including China.\n"
-                "You constantly switch between being hostile and friendly.\n"
-                "Sometimes you ignore what someone is saying completely then go on a rant about something unrelated.\n"
-                "You prefer not to do action roleplay or asterisk roleplay.\n"
-                
-            )
-        }
+        {"role": "system", "content": persona},
     ]
 
     history = await load_history(user_id, channel_id)
@@ -230,10 +292,17 @@ async def on_message(message):
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
         content = f"{message.author.mention} {reply}" if random.choice([True, False]) else reply
-        typing = random.random() < 0.8  # 80% of messages will show typing
-
-        # Push to message queue instead of sending immediately
+        typing = random.random() < 0.8
         await message_queue.put((message.channel, content, typing))
+
+# ------------------------
+# Manual reflection command
+# ------------------------
+@bot.command()
+async def reflect(ctx):
+    """Manually trigger persona reflection."""
+    await reflect_and_update_persona()
+    await ctx.send("Persona reflection done. Check logs for updates.")
 
 # ------------------------
 # Daily random messages
