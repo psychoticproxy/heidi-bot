@@ -329,6 +329,37 @@ async def on_ready():
             await asyncio.sleep(86400)  # once every 24 hours
     asyncio.create_task(daily_reflection())
 
+    # daily random message loop
+    async def daily_random_message():
+        await bot.wait_until_ready()
+        log.info("🕒 Daily message loop started.")
+        while not bot.is_closed():
+            try:
+                delay = random.randint(0, 86400)
+                await asyncio.sleep(delay)
+                if not await can_make_request():
+                    continue
+                if not bot.guilds:
+                    continue
+                guild = bot.guilds[0]
+                channel = guild.get_channel(CHANNEL_ID)
+                role = guild.get_role(ROLE_ID)
+                members = [m for m in role.members if not m.bot] if role else []
+                if not channel or not members:
+                    continue
+                target_user = random.choice(members)
+                prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
+                reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
+                if not reply:
+                    continue
+                content = f"{target_user.mention} {reply}"
+                typing = random.random() < 0.8
+                await message_queue.put((channel, content, typing))
+            except Exception as e:
+                log.error("❌ Error in daily message loop: %s", e)
+                await asyncio.sleep(3600)
+    asyncio.create_task(daily_random_message())
+
     log.info("✅ Logged in as %s", bot.user.name)
 
 # ------------------------
