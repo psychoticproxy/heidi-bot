@@ -12,12 +12,14 @@ import time
 import aiosqlite
 import logging
 
+# ------------------------
+# Logging setup
+# ------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler()]
 )
-
 log = logging.getLogger("heidi")
 
 # ------------------------
@@ -104,7 +106,7 @@ async def load_queued_messages():
         rows = await cursor.fetchall()
     for user_id, channel_id, prompt in rows:
         await retry_queue.put((user_id, channel_id, prompt, None))
-    await queue_db.execute("DELETE FROM queue")  # clear after loading
+    await queue_db.execute("DELETE FROM queue")
     await queue_db.commit()
 
 # ------------------------
@@ -116,10 +118,10 @@ async def message_worker():
         try:
             if typing:
                 async with channel.typing():
-                    await asyncio.sleep(min(len(content) * 0.05, 5))  # simulate typing duration
+                    await asyncio.sleep(min(len(content) * 0.05, 5))
             await safe_send(channel, content)
         except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord rate limit / HTTP error:")
+            log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
             await asyncio.sleep(5)
             await safe_send(channel, content)
         message_queue.task_done()
@@ -143,12 +145,11 @@ async def retry_worker():
                             typing = random.random() < 0.8
                             await message_queue.put((channel, reply, typing))
                         success = True
-                except Exception:
-                    log.warning("⚠️ Retry failed, will try again:")
+                except Exception as e:
+                    log.warning("⚠️ Retry failed, will try again: %s", e)
             else:
-                # quota exhausted, re-queue for later
                 await save_queued_message(user_id, channel_id, prompt)
-                success = True  # break loop silently
+                success = True  # silently break
 
             if not success:
                 await asyncio.sleep(delay)
@@ -174,7 +175,7 @@ async def prune_memory():
             (to_delete,)
         )
         await db.commit()
-        log.info(f"🗑️ Pruned {to_delete} old messages (kept {ROW_LIMIT}).")
+        log.info("🗑️ Pruned %s old messages (kept %s).", to_delete, ROW_LIMIT)
 
 async def save_message(user_id: int, channel_id: int, role: str, message: str):
     await db.execute(
@@ -196,8 +197,8 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
 # Persona Management
 # ------------------------
 DEFAULT_PERSONA = (
-    "You are Heidi, a laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic discord bot with split personality who is the daughter of Proxy, your creator. "
-    "Stay concise. Never exceed 2000 characters in a single reply."
+    "You are Heidi, a laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator. "
+    "Stay concise. Never exceed 2000 characters in a single reply. "
     "Never action/asterisk roleplay."
 )
 
@@ -230,7 +231,7 @@ You are managing a Discord persona. Here is the current persona description:
 {persona}
 
 Here are some recent interactions:
-{chr(10).join([f"{role}: {msg}" for role,msg in interactions])}
+{chr(10).join([f"{role}: {msg}" for role, msg in interactions])}
 
 Please suggest a refined persona description that stays consistent with the character,
 but improves clarity, tone, and style based on these interactions.
@@ -254,14 +255,21 @@ Output only the new persona text, nothing else.
                 },
                 timeout=60.0,
             )
+
+            if resp.status_code == 429:
+                log.warning("⚠️ Rate limited during persona reflection. Skipping.")
+                return
+
+            resp.raise_for_status()
             data = resp.json()
             new_persona = data["choices"][0]["message"]["content"].strip()
+
         if new_persona:
             await set_persona(new_persona)
             log.info("✨ Persona updated successfully.")
             log.info(new_persona)
     except Exception as e:
-        log.error(f"❌ Error during persona reflection: {e}")
+        log.error("❌ Error during persona reflection: %s", e)
 
 # ------------------------
 # Bot events
@@ -313,13 +321,13 @@ async def on_ready():
     asyncio.create_task(message_worker())
     asyncio.create_task(retry_worker())
 
-    # periodic reflection loop
-    async def periodic_reflection():
+    # once-per-day reflection
+    async def daily_reflection():
         await bot.wait_until_ready()
         while not bot.is_closed():
             await reflect_and_update_persona()
-            await asyncio.sleep(3600)
-    asyncio.create_task(periodic_reflection())
+            await asyncio.sleep(86400)  # once every 24 hours
+    asyncio.create_task(daily_reflection())
 
     # daily random message loop
     async def daily_random_message():
@@ -344,11 +352,11 @@ async def on_ready():
                 reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
                 if not reply:
                     continue
-                content = f"{target_user.mention} {reply}" if random.choice([True, False]) else reply
+                content = f"{target_user.mention} {reply}"
                 typing = random.random() < 0.8
                 await message_queue.put((channel, content, typing))
             except Exception as e:
-                log.error("❌ Error in daily message loop:", e)
+                log.error("❌ Error in daily message loop: %s", e)
                 await asyncio.sleep(3600)
     asyncio.create_task(daily_random_message())
 
@@ -382,11 +390,17 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
             },
             json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
         )
+        if resp.status_code == 429:
+            log.warning("⚠️ Rate limited by OpenRouter.")
+            await asyncio.sleep(30)
+            await save_queued_message(user_id, channel_id, prompt)
+            return None
+
         resp.raise_for_status()
         data = resp.json()
         reply = data["choices"][0]["message"]["content"]
     except Exception as e:
-        log.error("❌ API error:", e)
+        log.error("❌ API error: %s", e)
         await save_queued_message(user_id, channel_id, prompt)
         return None
 
@@ -406,7 +420,6 @@ async def on_message(message):
         now = time.time()
         last_used = user_cooldowns.get(message.author.id, 0)
         if now - last_used < COOLDOWN_SECONDS:
-            # Still run commands even if on cooldown
             await bot.process_commands(message)
             return
 
@@ -423,11 +436,7 @@ async def on_message(message):
             typing = random.random() < 0.8
             await message_queue.put((message.channel, content, typing))
 
-    # IMPORTANT: Always let commands like !persona and !reflect run
     await bot.process_commands(message)
-
-
-from discord.ext.commands import has_permissions, CheckFailure
 
 # ------------------------
 # Bot commands
@@ -441,7 +450,7 @@ async def reflect(ctx):
 
 @bot.command()
 async def persona(ctx):
-    """Show Heidi's current persona, chunked if long."""
+    """Show Heidi's current persona."""
     persona = await get_persona()
     if not persona:
         await ctx.send("No persona set.")
@@ -450,7 +459,7 @@ async def persona(ctx):
 
 @bot.command()
 async def queue(ctx):
-    """Show how many messages are waiting in memory and in persistent storage."""
+    """Show queued message counts."""
     mem_count = retry_queue.qsize()
     async with queue_db.execute("SELECT COUNT(*) FROM queue") as cursor:
         row = await cursor.fetchone()
@@ -461,22 +470,18 @@ async def queue(ctx):
 @bot.command()
 @has_permissions(administrator=True)
 async def clearqueue(ctx):
-    """Clear all queued messages (both memory + DB)."""
-    # Clear in-memory queue
+    """Clear all queued messages."""
     cleared_mem = 0
     while not retry_queue.empty():
         retry_queue.get_nowait()
         retry_queue.task_done()
         cleared_mem += 1
-
-    # Clear persistent DB queue
     await queue_db.execute("DELETE FROM queue")
     await queue_db.commit()
-
     await ctx.send(f"🗑️ Cleared {cleared_mem} messages from memory and wiped persistent queue.")
 
 # ------------------------
-# Error handler for admin-only commands
+# Error handler
 # ------------------------
 @bot.event
 async def on_command_error(ctx, error):
