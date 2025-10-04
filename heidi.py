@@ -440,7 +440,6 @@ async def reflect(ctx):
     await ctx.send("Persona reflection done. Check logs for updates.")
 
 @bot.command()
-@has_permissions(administrator=False)
 async def persona(ctx):
     """Show Heidi's current persona, chunked if long."""
     persona = await get_persona()
@@ -450,7 +449,6 @@ async def persona(ctx):
     await safe_send(ctx.channel, f"```{persona}```")
 
 @bot.command()
-@has_permissions(administrator=False)
 async def queue(ctx):
     """Show how many messages are waiting in memory and in persistent storage."""
     mem_count = retry_queue.qsize()
