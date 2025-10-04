@@ -258,6 +258,7 @@ Output only the new persona text, nothing else.
         if new_persona:
             await set_persona(new_persona)
             log.info("✨ Persona updated successfully.")
+            log.info(new_persona)
     except Exception as e:
         log.error(f"❌ Error during persona reflection: {e}")
 
@@ -419,12 +420,17 @@ async def on_message(message):
             await message_queue.put((message.channel, content, typing))
 
 # ------------------------
-# Manual reflection command
+# Bot commands
 # ------------------------
 @bot.command()
 async def reflect(ctx):
     await reflect_and_update_persona()
     await ctx.send("Persona reflection done. Check logs for updates.")
+
+@bot.command()
+async def persona(ctx):
+    persona = await get_persona()
+    await ctx.send(f"```{persona}```")
 
 # ------------------------
 # Run bot
