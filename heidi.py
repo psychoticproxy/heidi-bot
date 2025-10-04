@@ -234,7 +234,7 @@ Here are some recent interactions:
 
 Please suggest a refined persona description that stays consistent with the character,
 but improves clarity, tone, and style based on these interactions.
-Always include: 'Never exceed 2000 characters in a single response.'
+Always include: 'Never exceed 2000 characters in a single response. Never action/asterisk roleplay.'
 Output only the new persona text, nothing else.
 """
         async with httpx.AsyncClient() as client:
