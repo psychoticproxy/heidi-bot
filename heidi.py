@@ -3,6 +3,7 @@ from flask import Flask
 import os
 import discord
 from discord.ext import commands
+from discord.ext.commands import has_permissions, CheckFailure
 import httpx
 from dotenv import load_dotenv
 import asyncio
@@ -405,7 +406,10 @@ async def on_message(message):
         now = time.time()
         last_used = user_cooldowns.get(message.author.id, 0)
         if now - last_used < COOLDOWN_SECONDS:
+            # Still run commands even if on cooldown
+            await bot.process_commands(message)
             return
+
         user_cooldowns[message.author.id] = now
 
         user_input = message.content.replace(f"<@{bot.user.id}>", "").strip() or "What?"
@@ -419,18 +423,66 @@ async def on_message(message):
             typing = random.random() < 0.8
             await message_queue.put((message.channel, content, typing))
 
+    # IMPORTANT: Always let commands like !persona and !reflect run
+    await bot.process_commands(message)
+
+
+from discord.ext.commands import has_permissions, CheckFailure
+
 # ------------------------
 # Bot commands
 # ------------------------
 @bot.command()
+@has_permissions(administrator=True)
 async def reflect(ctx):
     await reflect_and_update_persona()
     await ctx.send("Persona reflection done. Check logs for updates.")
 
 @bot.command()
+@has_permissions(administrator=True)
 async def persona(ctx):
+    """Show Heidi's current persona, chunked if long."""
     persona = await get_persona()
-    await ctx.send(f"```{persona}```")
+    if not persona:
+        await ctx.send("No persona set.")
+        return
+    await safe_send(ctx.channel, f"```{persona}```")
+
+@bot.command()
+@has_permissions(administrator=True)
+async def queue(ctx):
+    """Show how many messages are waiting in memory and in persistent storage."""
+    mem_count = retry_queue.qsize()
+    async with queue_db.execute("SELECT COUNT(*) FROM queue") as cursor:
+        row = await cursor.fetchone()
+    db_count = row[0] if row else 0
+    total = mem_count + db_count
+    await ctx.send(f"📨 Queued messages: {total} (memory: {mem_count}, stored: {db_count})")
+
+@bot.command()
+@has_permissions(administrator=True)
+async def clearqueue(ctx):
+    """Clear all queued messages (both memory + DB)."""
+    # Clear in-memory queue
+    cleared_mem = 0
+    while not retry_queue.empty():
+        retry_queue.get_nowait()
+        retry_queue.task_done()
+        cleared_mem += 1
+
+    # Clear persistent DB queue
+    await queue_db.execute("DELETE FROM queue")
+    await queue_db.commit()
+
+    await ctx.send(f"🗑️ Cleared {cleared_mem} messages from memory and wiped persistent queue.")
+
+# ------------------------
+# Error handler for admin-only commands
+# ------------------------
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, CheckFailure):
+        await ctx.send("⛔ You don’t have permission to use that command.")
 
 # ------------------------
 # Run bot
