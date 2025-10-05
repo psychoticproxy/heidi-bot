@@ -35,7 +35,8 @@ def run_web():
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_web).start()
+# run Flask in a daemon thread so it won't block shutdown
+threading.Thread(target=run_web, daemon=True).start()
 
 # ------------------------
 # Environment setup
@@ -102,12 +103,26 @@ async def save_queued_message(user_id, channel_id, prompt):
     await queue_db.commit()
 
 async def load_queued_messages():
-    async with queue_db.execute("SELECT user_id, channel_id, prompt FROM queue ORDER BY id ASC") as cursor:
-        rows = await cursor.fetchall()
-    for user_id, channel_id, prompt in rows:
-        await retry_queue.put((user_id, channel_id, prompt, None))
-    await queue_db.execute("DELETE FROM queue")
-    await queue_db.commit()
+    """Load any stored queued messages into the in-memory retry queue.
+
+    This function removes rows from the persistent DB after enqueuing them.
+    That's intentional: the retry queue will attempt delivery and on failure
+    will re-save back to the DB so persistence is preserved.
+    """
+    global queue_db
+    try:
+        async with queue_db.execute("SELECT id, user_id, channel_id, prompt FROM queue ORDER BY id ASC") as cursor:
+            rows = await cursor.fetchall()
+        if not rows:
+            return
+        for _id, user_id, channel_id, prompt in rows:
+            await retry_queue.put((user_id, channel_id, prompt, None))
+        # delete loaded rows
+        await queue_db.execute("DELETE FROM queue")
+        await queue_db.commit()
+        log.info("📥 Loaded %s persisted queued messages into retry queue.", len(rows))
+    except Exception as e:
+        log.error("❌ Error loading queued messages: %s", e)
 
 # ------------------------
 # Message worker
@@ -123,8 +138,17 @@ async def message_worker():
         except discord.errors.HTTPException as e:
             log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
             await asyncio.sleep(5)
-            await safe_send(channel, content)
-        message_queue.task_done()
+            try:
+                await safe_send(channel, content)
+            except Exception as e2:
+                log.error("❌ Failed to send message after retry: %s", e2)
+        except Exception as e:
+            log.error("❌ Unexpected error in message_worker: %s", e)
+        finally:
+            try:
+                message_queue.task_done()
+            except Exception:
+                pass
 
 # ------------------------
 # Retry worker
@@ -145,17 +169,30 @@ async def retry_worker():
                             typing = random.random() < 0.8
                             await message_queue.put((channel, reply, typing))
                         success = True
+                    else:
+                        # ask_openrouter either saved to DB or failed. Backoff and retry.
+                        log.info("ℹ️ ask_openrouter returned no reply. Backing off and retrying.")
                 except Exception as e:
                     log.warning("⚠️ Retry failed, will try again: %s", e)
             else:
-                await save_queued_message(user_id, channel_id, prompt)
-                success = True  # silently break
+                # Persist to DB so messages survive restarts.
+                try:
+                    await save_queued_message(user_id, channel_id, prompt)
+                    log.info("💾 Persisted queued message because rate limit reached or daily limit exceeded.")
+                except Exception as e:
+                    log.error("❌ Failed to persist queued message: %s", e)
+                # break out so retry_queue task is marked done. A background loader
+                # will re-insert persisted rows periodically.
+                success = True
 
             if not success:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 300)
 
-        retry_queue.task_done()
+        try:
+            retry_queue.task_done()
+        except Exception:
+            pass
 
 # ------------------------
 # SQLite setup
@@ -216,7 +253,7 @@ async def load_recent_interactions(limit=10):
         "SELECT role, message FROM memory ORDER BY timestamp DESC LIMIT ?", (limit,)
     ) as cursor:
         rows = await cursor.fetchall()
-    return [(r[0], r[1]) for r in rows[::-1]]
+    return [(r[0], r[1]) for r in rows[::-1]
 
 async def reflect_and_update_persona():
     try:
@@ -328,6 +365,17 @@ async def on_ready():
             await reflect_and_update_persona()
             await asyncio.sleep(86400)  # once every 24 hours
     asyncio.create_task(daily_reflection())
+
+    # periodic loader to pick up persisted queued messages
+    async def periodic_queue_loader():
+        await bot.wait_until_ready()
+        while not bot.is_closed():
+            try:
+                await load_queued_messages()
+            except Exception as e:
+                log.error("❌ Error in periodic_queue_loader: %s", e)
+            await asyncio.sleep(30)  # check every 30 seconds
+    asyncio.create_task(periodic_queue_loader())
 
     # daily random message loop
     async def daily_random_message():
@@ -473,9 +521,12 @@ async def clearqueue(ctx):
     """Clear all queued messages."""
     cleared_mem = 0
     while not retry_queue.empty():
-        retry_queue.get_nowait()
-        retry_queue.task_done()
-        cleared_mem += 1
+        try:
+            retry_queue.get_nowait()
+            retry_queue.task_done()
+            cleared_mem += 1
+        except Exception:
+            break
     await queue_db.execute("DELETE FROM queue")
     await queue_db.commit()
     await ctx.send(f"🗑️ Cleared {cleared_mem} messages from memory and wiped persistent queue.")
