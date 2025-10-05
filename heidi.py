@@ -95,6 +95,33 @@ retry_queue = asyncio.Queue()
 QUEUE_DB = "queued_messages.db"
 queue_db = None
 
+# track DB row ids already loaded into the in-memory retry queue
+loaded_queue_ids = set()
+
+async def load_queued_messages():
+    """Load persisted queued messages into the in-memory retry queue without deleting DB rows.
+    Keeps DB rows until a message is successfully delivered.
+    """
+    global queue_db, loaded_queue_ids
+    try:
+        async with queue_db.execute("SELECT id, user_id, channel_id, prompt FROM queue ORDER BY id ASC") as cursor:
+            rows = await cursor.fetchall()
+        if not rows:
+            return
+
+        count = 0
+        for _id, user_id, channel_id, prompt in rows:
+            if _id in loaded_queue_ids:
+                continue
+            # push the DB id along with the row so the worker can delete it on success
+            await retry_queue.put((_id, user_id, channel_id, prompt, None))
+            loaded_queue_ids.add(_id)
+            count += 1
+
+        log.info("📥 Loaded %s persisted queued messages into retry queue.", count)
+    except Exception as e:
+        log.error("❌ Error loading queued messages: %s", e)
+
 async def save_queued_message(user_id, channel_id, prompt):
     await queue_db.execute(
         "INSERT INTO queue (user_id, channel_id, prompt) VALUES (?, ?, ?)",
@@ -102,6 +129,35 @@ async def save_queued_message(user_id, channel_id, prompt):
     )
     await queue_db.commit()
 
+# ------------------------
+# Message worker
+# ------------------------
+async def message_worker():
+    while True:
+        channel, content, typing = await message_queue.get()
+        try:
+            if typing:
+                async with channel.typing():
+                    await asyncio.sleep(min(len(content) * 0.05, 5))
+            await safe_send(channel, content)
+        except discord.errors.HTTPException as e:
+            log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
+            await asyncio.sleep(5)
+            try:
+                await safe_send(channel, content)
+            except Exception as e2:
+                log.error("❌ Failed to send message after retry: %s", e2)
+        except Exception as e:
+            log.error("❌ Unexpected error in message_worker: %s", e)
+        finally:
+            try:
+                message_queue.task_done()
+            except Exception:
+                pass
+
+# ------------------------
+# Retry worker (single, authoritative)
+# ------------------------
 async def retry_worker():
     while True:
         item = await retry_queue.get()
@@ -189,76 +245,6 @@ async def retry_worker():
 # ------------------------
 # SQLite setup
 # ------------------------
-async def message_worker():
-    while True:
-        channel, content, typing = await message_queue.get()
-        try:
-            if typing:
-                async with channel.typing():
-                    await asyncio.sleep(min(len(content) * 0.05, 5))
-            await safe_send(channel, content)
-        except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
-            await asyncio.sleep(5)
-            try:
-                await safe_send(channel, content)
-            except Exception as e2:
-                log.error("❌ Failed to send message after retry: %s", e2)
-        except Exception as e:
-            log.error("❌ Unexpected error in message_worker: %s", e)
-        finally:
-            try:
-                message_queue.task_done()
-            except Exception:
-                pass
-
-# ------------------------
-# Retry worker
-# ------------------------
-async def retry_worker():
-    while True:
-        user_id, channel_id, prompt, discord_user = await retry_queue.get()
-        success = False
-        delay = 10  # start delay
-
-        while not success:
-            if await can_make_request():
-                try:
-                    reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
-                    if reply:
-                        channel = bot.get_channel(int(channel_id))
-                        if channel:
-                            typing = random.random() < 0.8
-                            await message_queue.put((channel, reply, typing))
-                        success = True
-                    else:
-                        # ask_openrouter either saved to DB or failed. Backoff and retry.
-                        log.info("ℹ️ ask_openrouter returned no reply. Backing off and retrying.")
-                except Exception as e:
-                    log.warning("⚠️ Retry failed, will try again: %s", e)
-            else:
-                # Persist to DB so messages survive restarts.
-                try:
-                    await save_queued_message(user_id, channel_id, prompt)
-                    log.info("💾 Persisted queued message because rate limit reached or daily limit exceeded.")
-                except Exception as e:
-                    log.error("❌ Failed to persist queued message: %s", e)
-                # break out so retry_queue task is marked done. A background loader
-                # will re-insert persisted rows periodically.
-                success = True
-
-            if not success:
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 300)
-
-        try:
-            retry_queue.task_done()
-        except Exception:
-            pass
-
-# ------------------------
-# SQLite setup
-# ------------------------
 DB_FILE = "heidi_memory.db"
 ROW_LIMIT = 500000
 db = None
@@ -315,7 +301,7 @@ async def load_recent_interactions(limit=10):
         "SELECT role, message FROM memory ORDER BY timestamp DESC LIMIT ?", (limit,)
     ) as cursor:
         rows = await cursor.fetchall()
-        return [(r[0], r[1]) for r in rows[::-1]]
+    return [(r[0], r[1]) for r in rows[::-1]]
 
 async def reflect_and_update_persona():
     try:
@@ -412,7 +398,11 @@ async def on_ready():
     )
     """)
     await queue_db.commit()
-    await load_queued_messages()
+
+    try:
+        await load_queued_messages()
+    except Exception as e:
+        log.error("❌ Failed to load queued messages during startup: %s", e)
 
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
