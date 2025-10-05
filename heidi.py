@@ -156,43 +156,55 @@ async def message_worker():
 async def retry_worker():
     while True:
         user_id, channel_id, prompt, discord_user = await retry_queue.get()
-        success = False
-        delay = 10  # start delay
-
-        while not success:
-            if await can_make_request():
-                try:
-                    reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
-                    if reply:
-                        channel = bot.get_channel(int(channel_id))
-                        if channel:
-                            typing = random.random() < 0.8
-                            await message_queue.put((channel, reply, typing))
-                        success = True
-                    else:
-                        # ask_openrouter either saved to DB or failed. Backoff and retry.
-                        log.info("ℹ️ ask_openrouter returned no reply. Backing off and retrying.")
-                except Exception as e:
-                    log.warning("⚠️ Retry failed, will try again: %s", e)
-            else:
-                # Persist to DB so messages survive restarts.
-                try:
-                    await save_queued_message(user_id, channel_id, prompt)
-                    log.info("💾 Persisted queued message because rate limit reached or daily limit exceeded.")
-                except Exception as e:
-                    log.error("❌ Failed to persist queued message: %s", e)
-                # break out so retry_queue task is marked done. A background loader
-                # will re-insert persisted rows periodically.
-                success = True
-
-            if not success:
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 300)
-
         try:
-            retry_queue.task_done()
-        except Exception:
-            pass
+            log.info("🔁 Processing queued message user=%s channel=%s", user_id, channel_id)
+            attempt = 0
+            max_attempts_before_persist = 5
+            delay = 5
+
+            while True:
+                if await can_make_request():
+                    try:
+                        reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
+                        if reply:
+                            channel = bot.get_channel(int(channel_id))
+                            if channel:
+                                typing = random.random() < 0.8
+                                await message_queue.put((channel, reply, typing))
+                            log.info("✅ Sent queued reply for user=%s", user_id)
+                            break
+                        else:
+                            log.info("ℹ️ ask_openrouter returned no reply; will back off and retry")
+                    except Exception as e:
+                        log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
+                else:
+                    log.info("⏳ can_make_request() false (quota/rate). attempt=%s/%s", attempt+1, max_attempts_before_persist)
+
+                attempt += 1
+                if attempt >= max_attempts_before_persist:
+                    try:
+                        await save_queued_message(user_id, channel_id, prompt)
+                        log.info("💾 Persisted queued message after %s attempts user=%s", attempt, user_id)
+                    except Exception as e:
+                        log.error("❌ Failed to persist queued message: %s", e)
+                    break
+
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+
+        except Exception as e:
+            log.error("❌ Unexpected retry_worker error: %s", e)
+            try:
+                await save_queued_message(user_id, channel_id, prompt)
+                log.info("💾 Persisted queued message due to unexpected error.")
+            except Exception as e2:
+                log.error("❌ Failed to persist after unexpected error: %s", e2)
+        finally:
+            try:
+                retry_queue.task_done()
+            except Exception:
+                pass
+
 
 # ------------------------
 # SQLite setup
