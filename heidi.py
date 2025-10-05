@@ -253,7 +253,7 @@ async def load_recent_interactions(limit=10):
         "SELECT role, message FROM memory ORDER BY timestamp DESC LIMIT ?", (limit,)
     ) as cursor:
         rows = await cursor.fetchall()
-    return [(r[0], r[1]) for r in rows[::-1]
+        return [(r[0], r[1]) for r in rows[::-1]]
 
 async def reflect_and_update_persona():
     try:
