@@ -163,14 +163,14 @@ async def message_worker():
 async def retry_worker():
     while True:
         item = await retry_queue.get()
-        # item format: (id, user_id, channel_id, prompt, discord_user)
         _id = None
         user_id = channel_id = prompt = discord_user = None
         try:
+            # normalize item formats
             if isinstance(item, tuple) and len(item) >= 4 and isinstance(item[0], int):
-                _id, user_id, channel_id, prompt, discord_user = (item[0], item[1], item[2], item[3], None if len(item) < 5 else item[4])
+                _id, user_id, channel_id, prompt = item[0], item[1], item[2], item[3]
+                discord_user = None if len(item) < 5 else item[4]
             else:
-                # legacy format fallback: (user_id, channel_id, prompt, discord_user)
                 try:
                     user_id, channel_id, prompt, discord_user = item
                 except Exception:
@@ -184,45 +184,50 @@ async def retry_worker():
             delay = 5
 
             while True:
-                if await can_make_request():
+                # Call ask_openrouter directly. It will handle quota and persistence if needed.
+                try:
+                    reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
+                except Exception as e:
+                    log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
+                    reply = None
+
+                if reply:
+                    # try to find the channel and enqueue for sending
                     try:
-                        reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
-                        if reply:
-                            channel = bot.get_channel(int(channel_id))
-                            if channel:
-                                typing = random.random() < 0.8
-                                await message_queue.put((channel, reply, typing))
-                            log.info("✅ Sent queued reply for user=%s id=%s", user_id, _id)
+                        chan = bot.get_channel(int(channel_id))
+                    except Exception:
+                        chan = None
 
-                            # remove the row from the DB now that delivery succeeded
-                            if _id is not None:
-                                try:
-                                    await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
-                                    await queue_db.commit()
-                                    loaded_queue_ids.discard(_id)
-                                    log.info("🗑️ Deleted queued row id=%s after successful delivery.", _id)
-                                except Exception as e:
-                                    log.error("❌ Failed to delete queued DB row id=%s: %s", _id, e)
+                    if chan:
+                        typing = random.random() < 0.8
+                        await message_queue.put((chan, reply, typing))
+                        log.info("✅ Enqueued queued reply for user=%s id=%s", user_id, _id)
 
-                            break
-                        else:
-                            log.info("ℹ️ ask_openrouter returned no reply; will back off and retry")
-                    except Exception as e:
-                        log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
+                        # delete DB row only after successful enqueue
+                        if _id is not None:
+                            try:
+                                await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
+                                await queue_db.commit()
+                                loaded_queue_ids.discard(_id)
+                                log.info("🗑️ Deleted queued row id=%s after successful delivery.", _id)
+                            except Exception as e:
+                                log.error("❌ Failed to delete queued DB row id=%s: %s", _id, e)
+                        break
+                    else:
+                        log.warning("⚠️ Channel %s not found for queued message id=%s. Leaving in DB and will retry later.", channel_id, _id)
+                        # don't delete the DB row; back off and retry
                 else:
-                    log.info("⏳ can_make_request() false (quota/rate). attempt=%s/%s id=%s", attempt+1, max_attempts_before_persist, _id)
+                    log.info("ℹ️ ask_openrouter returned no reply; will back off and retry (attempt %s).", attempt + 1)
 
                 attempt += 1
                 if attempt >= max_attempts_before_persist:
                     if _id is None:
-                        # persist to DB so it survives restarts
                         try:
                             await save_queued_message(user_id, channel_id, prompt)
                             log.info("💾 Persisted queued message after %s attempts user=%s", attempt, user_id)
                         except Exception as e:
                             log.error("❌ Failed to persist queued message: %s", e)
                     else:
-                        # it's already in DB. leave it for later loader runs.
                         log.info("💾 Leaving message in DB id=%s for later retry.", _id)
                     break
 
@@ -231,7 +236,6 @@ async def retry_worker():
 
         except Exception as e:
             log.error("❌ Unexpected retry_worker error: %s", e)
-            # if the item was not in DB, try to persist it now
             try:
                 if _id is None and user_id is not None:
                     await save_queued_message(user_id, channel_id, prompt)
@@ -243,6 +247,7 @@ async def retry_worker():
                 retry_queue.task_done()
             except Exception:
                 pass
+
 
 # ------------------------
 # SQLite setup
