@@ -729,7 +729,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
                 "x-title": "Heidi Bot",
                 "content-type": "application/json",
             },
-            json={"model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "messages": messages},
+            json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
         )
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited by OpenRouter.")
