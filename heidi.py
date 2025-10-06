@@ -875,11 +875,9 @@ async def randommsg(ctx):
     members = [m for m in role.members if not m.bot] if role.members else []
     if not members:
         try:
-            # requires Server Members Intent to be enabled in dev portal
             members = [m async for m in guild.fetch_members(limit=None) if role in m.roles and not m.bot]
         except Exception as e:
             log.warning("⚠️ Failed to fetch members: %s", e)
-            # fallback to guild.members (may be empty if not cached)
             members = [m for m in guild.members if role in m.roles and not m.bot]
 
     if not members:
@@ -898,7 +896,10 @@ async def randommsg(ctx):
 
     content = f"{target_user.mention} {reply}"
     typing = random.random() < 0.8
-    await message_queue.put((message.channel, (content.strip(), message), typing))
+
+    # ✅ fixed line: use ctx.channel and ctx.message
+    await message_queue.put((ctx.channel, (content.strip(), ctx.message), typing))
+
     await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
