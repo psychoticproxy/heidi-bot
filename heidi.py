@@ -137,12 +137,21 @@ async def save_queued_message(user_id, channel_id, prompt):
 # ------------------------
 async def message_worker():
     while True:
-        channel, content, typing = await message_queue.get()
+        item = await message_queue.get()
+        # backward compatibility for old tuples
+        if len(item) == 3:
+            channel, content, typing = item
+            reply_to = None
+        else:
+            channel, (content, reply_to), typing = item
         try:
             if typing:
                 async with channel.typing():
                     await asyncio.sleep(min(len(content) * 0.05, 5))
-            await safe_send(channel, content)
+            if reply_to:
+                await reply_to.reply(content)
+            else:
+                await safe_send(channel, content)
         except discord.errors.HTTPException as e:
             log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
             await asyncio.sleep(5)
@@ -774,9 +783,9 @@ async def on_message(message):
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
         if reply:
-            content = f"{message.author.mention} {reply}" if random.choice([True, False]) else reply
+            content = f"{message.author.mention} {reply}"
             typing = random.random() < 0.8
-            await message_queue.put((message.channel, content, typing))
+            await message_queue.put((message.channel, (content, message), typing))
 
     await bot.process_commands(message)
 
