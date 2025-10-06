@@ -785,7 +785,7 @@ async def on_message(message):
 @bot.command()
 @has_permissions(administrator=True)
 async def reflect(ctx):
-    """Manually update persona."""
+    """Manually reflect persona."""
     await reflect_and_update_persona()
     await ctx.send("Persona reflection done. Check logs for updates.")
 
@@ -823,6 +823,19 @@ async def clearqueue(ctx):
     await queue_db.execute("DELETE FROM queue")
     await queue_db.commit()
     await ctx.send(f"🗑️ Cleared {cleared_mem} messages from memory and wiped persistent queue.")
+
+@bot.command()
+@has_permissions(administrator=True)
+async def setpersona(ctx, *, text: str):
+    """Manually replace Heidi's persona text (admin only)."""
+    try:
+        await set_persona(text)
+        await ctx.send("✅ Persona updated successfully.")
+        log.info("📝 Persona manually updated by admin %s.", ctx.author)
+    except Exception as e:
+        log.error("❌ Failed to update persona: %s", e)
+        await ctx.send("❌ Error updating persona. Check logs.")
+
 
 # ------------------------
 # Error handler
