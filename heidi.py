@@ -859,32 +859,22 @@ async def randommsg(ctx):
         await ctx.send("❌ This command must be run inside a server.")
         return
 
-    # lookup channel
-    channel = guild.get_channel(CHANNEL_ID) or discord.utils.get(guild.text_channels, id=CHANNEL_ID)
-    if not channel:
-        await ctx.send("❌ Channel not found or bot lacks access to it.")
-        return
+    target_channel_id = 1385570983062278268
+    role_id = ROLE_ID  # reuse your configured role
 
-    # lookup role
-    role = guild.get_role(ROLE_ID) or next((r for r in guild.roles if r.id == ROLE_ID), None)
+    channel = guild.get_channel(target_channel_id)
+    role = guild.get_role(role_id)
+
+    if not channel:
+        await ctx.send("❌ Target channel not found or bot lacks access.")
+        return
     if not role:
         await ctx.send("❌ Role not found in this guild.")
         return
 
-    # try cached role.members first, otherwise fetch members from the API
-    members = [m for m in role.members if not m.bot] if role.members else []
+    members = [m for m in role.members if not m.bot]
     if not members:
-        try:
-            members = [m async for m in guild.fetch_members(limit=None) if role in m.roles and not m.bot]
-        except Exception as e:
-            log.warning("⚠️ Failed to fetch members: %s", e)
-            members = [m for m in guild.members if role in m.roles and not m.bot]
-
-    if not members:
-        await ctx.send(
-            "❌ No eligible members found in the role. "
-            "Make sure the bot has the Server Members Intent enabled in the Discord Developer Portal and restart it."
-        )
+        await ctx.send("❌ No eligible members found in that role.")
         return
 
     target_user = random.choice(members)
@@ -897,12 +887,12 @@ async def randommsg(ctx):
     content = f"{target_user.mention} {reply}"
     typing = random.random() < 0.8
 
-    # ✅ fixed line: use ctx.channel and ctx.message
-    await message_queue.put((ctx.channel, (content.strip(), ctx.message), typing))
+    # send message to the target channel, not as a reply
+    await message_queue.put((channel, content.strip(), typing))
 
-    await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
+    await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
-
+    
 # ------------------------
 # Error handler
 # ------------------------
