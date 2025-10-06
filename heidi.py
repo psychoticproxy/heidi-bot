@@ -138,34 +138,40 @@ async def save_queued_message(user_id, channel_id, prompt):
 async def message_worker():
     while True:
         item = await message_queue.get()
-        # backward compatibility for old tuples
-        if len(item) == 3:
+
+        # Handle both old (channel, content, typing)
+        # and new (channel, (content, reply_to), typing) formats
+        if isinstance(item[1], tuple):
+            channel, (content, reply_to), typing = item
+        else:
             channel, content, typing = item
             reply_to = None
-        else:
-            channel, (content, reply_to), typing = item
+
         try:
             if typing:
                 async with channel.typing():
                     await asyncio.sleep(min(len(content) * 0.05, 5))
-            if reply_to:
+
+            # Correct reply handling
+            if reply_to is not None:
                 await reply_to.reply(content)
             else:
                 await safe_send(channel, content)
+
         except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
+            log.warning("⚠️ Discord HTTP error: %s", e)
             await asyncio.sleep(5)
             try:
-                await safe_send(channel, content)
+                if reply_to is not None:
+                    await reply_to.reply(content)
+                else:
+                    await safe_send(channel, content)
             except Exception as e2:
-                log.error("❌ Failed to send message after retry: %s", e2)
+                log.error("❌ Retry failed: %s", e2)
         except Exception as e:
-            log.error("❌ Unexpected error in message_worker: %s", e)
+            log.error("❌ message_worker error: %s", e)
         finally:
-            try:
-                message_queue.task_done()
-            except Exception:
-                pass
+            message_queue.task_done()
 
 # ------------------------
 # Retry worker (single, authoritative)
@@ -300,8 +306,6 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
 # ------------------------
 DEFAULT_PERSONA = (
     "You are Heidi, a laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator. "
-    "Stay concise. Never exceed 2000 characters in a single reply. "
-    "Never action/asterisk roleplay."
 )
 
 async def get_persona():
@@ -894,7 +898,7 @@ async def randommsg(ctx):
 
     content = f"{target_user.mention} {reply}"
     typing = random.random() < 0.8
-    await message_queue.put((channel, content, typing))
+    await message_queue.put((message.channel, (content.strip(), message), typing))
     await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
