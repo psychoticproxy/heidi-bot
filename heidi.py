@@ -56,8 +56,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 user_cooldowns = {}
-COOLDOWN_SECONDS = 15
-DAILY_LIMIT = 1000
+COOLDOWN_SECONDS = 30
+DAILY_LIMIT = 50
 
 # ------------------------
 # Daily quota tracking
