@@ -55,6 +55,7 @@ if not OPENROUTER_API_KEY:
 # ------------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 user_cooldowns = {}
@@ -840,38 +841,53 @@ async def setpersona(ctx, *, text: str):
 @has_permissions(administrator=True)
 async def randommsg(ctx):
     """Trigger Heidi's daily random message manually (admin only)."""
-    try:
-        guild = ctx.guild
-        if not guild:
-            await ctx.send("❌ This command must be run inside a server.")
-            return
+    guild = ctx.guild
+    if not guild:
+        await ctx.send("❌ This command must be run inside a server.")
+        return
 
-        channel = guild.get_channel(CHANNEL_ID)
-        role = guild.get_role(ROLE_ID)
-        if not channel or not role:
-            await ctx.send("❌ Channel or role not configured correctly.")
-            return
+    # lookup channel
+    channel = guild.get_channel(CHANNEL_ID) or discord.utils.get(guild.text_channels, id=CHANNEL_ID)
+    if not channel:
+        await ctx.send("❌ Channel not found or bot lacks access to it.")
+        return
 
-        members = [m for m in role.members if not m.bot]
-        if not members:
-            await ctx.send("❌ No eligible members found in the role.")
-            return
+    # lookup role
+    role = guild.get_role(ROLE_ID) or next((r for r in guild.roles if r.id == ROLE_ID), None)
+    if not role:
+        await ctx.send("❌ Role not found in this guild.")
+        return
 
-        target_user = random.choice(members)
-        prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
-        reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
-        if not reply:
-            await ctx.send("⚠️ No reply generated (possibly rate-limited).")
-            return
+    # try cached role.members first, otherwise fetch members from the API
+    members = [m for m in role.members if not m.bot] if role.members else []
+    if not members:
+        try:
+            # requires Server Members Intent to be enabled in dev portal
+            members = [m async for m in guild.fetch_members(limit=None) if role in m.roles and not m.bot]
+        except Exception as e:
+            log.warning("⚠️ Failed to fetch members: %s", e)
+            # fallback to guild.members (may be empty if not cached)
+            members = [m for m in guild.members if role in m.roles and not m.bot]
 
-        content = f"{target_user.mention} {reply}"
-        typing = random.random() < 0.8
-        await message_queue.put((channel, content, typing))
-        await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
-        log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
-    except Exception as e:
-        log.error("❌ Error in randommsg command: %s", e)
-        await ctx.send("❌ Error triggering random message. Check logs.")
+    if not members:
+        await ctx.send(
+            "❌ No eligible members found in the role. "
+            "Make sure the bot has the Server Members Intent enabled in the Discord Developer Portal and restart it."
+        )
+        return
+
+    target_user = random.choice(members)
+    prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
+    reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
+    if not reply:
+        await ctx.send("⚠️ No reply generated (possibly rate-limited).")
+        return
+
+    content = f"{target_user.mention} {reply}"
+    typing = random.random() < 0.8
+    await message_queue.put((channel, content, typing))
+    await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
+    log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
 # ------------------------
 # Error handler
