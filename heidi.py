@@ -341,7 +341,7 @@ Output only the new persona text, nothing else.
                         "X-Title": "Heidi Discord Bot",
                     },
                     json={
-                        "model": "deepseek/deepseek-chat-v3.1:free",
+                        "model": "deepseek/deepseek-r1-0528:free",
                         "messages": [
                             {"role": "system", "content": "You are a helpful assistant."},
                             {"role": "user", "content": reflection_prompt},
@@ -358,7 +358,7 @@ Output only the new persona text, nothing else.
                     "X-Title": "Heidi Discord Bot",
                 },
                 json={
-                    "model": "deepseek/deepseek-chat-v3.1:free",
+                    "model": "deepseek/deepseek-r1-0528:free",
                     "messages": [
                         {"role": "system", "content": "You are a helpful assistant."},
                         {"role": "user", "content": reflection_prompt},
@@ -422,7 +422,7 @@ async def summarize_user_history(user_id, channel_id):
                         "X-Title": "Heidi Discord Bot",
                     },
                     json={
-                        "model": "deepseek/deepseek-chat-v3.1:free",
+                        "model": "deepseek/deepseek-r1-0528:free",
                         "messages": [
                             {"role": "system", "content": "You are a concise summarizer."},
                             {"role": "user", "content": prompt},
@@ -439,7 +439,7 @@ async def summarize_user_history(user_id, channel_id):
                     "X-Title": "Heidi Discord Bot",
                 },
                 json={
-                    "model": "deepseek/deepseek-chat-v3.1:free",
+                    "model": "deepseek/deepseek-r1-0528:free",
                     "messages": [
                         {"role": "system", "content": "You are a concise summarizer."},
                         {"role": "user", "content": prompt},
@@ -729,7 +729,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
                 "x-title": "Heidi Bot",
                 "content-type": "application/json",
             },
-            json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
+            json={"model": "deepseek/deepseek-r1-0528:free", "messages": messages},
         )
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited by OpenRouter.")
