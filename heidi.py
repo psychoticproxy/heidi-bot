@@ -11,6 +11,8 @@ import random
 import time
 import aiosqlite
 import logging
+import re
+from collections import Counter
 
 # ------------------------
 # Logging setup
@@ -53,11 +55,12 @@ if not OPENROUTER_API_KEY:
 # ------------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 user_cooldowns = {}
-COOLDOWN_SECONDS = 30
-DAILY_LIMIT = 50
+COOLDOWN_SECONDS = 15
+DAILY_LIMIT = 1000
 
 # ------------------------
 # Daily quota tracking
@@ -161,14 +164,14 @@ async def message_worker():
 async def retry_worker():
     while True:
         item = await retry_queue.get()
-        # item format: (id, user_id, channel_id, prompt, discord_user)
         _id = None
         user_id = channel_id = prompt = discord_user = None
         try:
+            # normalize item formats
             if isinstance(item, tuple) and len(item) >= 4 and isinstance(item[0], int):
-                _id, user_id, channel_id, prompt, discord_user = (item[0], item[1], item[2], item[3], None if len(item) < 5 else item[4])
+                _id, user_id, channel_id, prompt = item[0], item[1], item[2], item[3]
+                discord_user = None if len(item) < 5 else item[4]
             else:
-                # legacy format fallback: (user_id, channel_id, prompt, discord_user)
                 try:
                     user_id, channel_id, prompt, discord_user = item
                 except Exception:
@@ -182,45 +185,50 @@ async def retry_worker():
             delay = 5
 
             while True:
-                if await can_make_request():
+                # Call ask_openrouter directly. It will handle quota and persistence if needed.
+                try:
+                    reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
+                except Exception as e:
+                    log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
+                    reply = None
+
+                if reply:
+                    # try to find the channel and enqueue for sending
                     try:
-                        reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
-                        if reply:
-                            channel = bot.get_channel(int(channel_id))
-                            if channel:
-                                typing = random.random() < 0.8
-                                await message_queue.put((channel, reply, typing))
-                            log.info("✅ Sent queued reply for user=%s id=%s", user_id, _id)
+                        chan = bot.get_channel(int(channel_id))
+                    except Exception:
+                        chan = None
 
-                            # remove the row from the DB now that delivery succeeded
-                            if _id is not None:
-                                try:
-                                    await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
-                                    await queue_db.commit()
-                                    loaded_queue_ids.discard(_id)
-                                    log.info("🗑️ Deleted queued row id=%s after successful delivery.", _id)
-                                except Exception as e:
-                                    log.error("❌ Failed to delete queued DB row id=%s: %s", _id, e)
+                    if chan:
+                        typing = random.random() < 0.8
+                        await message_queue.put((chan, reply, typing))
+                        log.info("✅ Enqueued queued reply for user=%s id=%s", user_id, _id)
 
-                            break
-                        else:
-                            log.info("ℹ️ ask_openrouter returned no reply; will back off and retry")
-                    except Exception as e:
-                        log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
+                        # delete DB row only after successful enqueue
+                        if _id is not None:
+                            try:
+                                await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
+                                await queue_db.commit()
+                                loaded_queue_ids.discard(_id)
+                                log.info("🗑️ Deleted queued row id=%s after successful delivery.", _id)
+                            except Exception as e:
+                                log.error("❌ Failed to delete queued DB row id=%s: %s", _id, e)
+                        break
+                    else:
+                        log.warning("⚠️ Channel %s not found for queued message id=%s. Leaving in DB and will retry later.", channel_id, _id)
+                        # don't delete the DB row; back off and retry
                 else:
-                    log.info("⏳ can_make_request() false (quota/rate). attempt=%s/%s id=%s", attempt+1, max_attempts_before_persist, _id)
+                    log.info("ℹ️ ask_openrouter returned no reply; will back off and retry (attempt %s).", attempt + 1)
 
                 attempt += 1
                 if attempt >= max_attempts_before_persist:
                     if _id is None:
-                        # persist to DB so it survives restarts
                         try:
                             await save_queued_message(user_id, channel_id, prompt)
                             log.info("💾 Persisted queued message after %s attempts user=%s", attempt, user_id)
                         except Exception as e:
                             log.error("❌ Failed to persist queued message: %s", e)
                     else:
-                        # it's already in DB. leave it for later loader runs.
                         log.info("💾 Leaving message in DB id=%s for later retry.", _id)
                     break
 
@@ -229,7 +237,6 @@ async def retry_worker():
 
         except Exception as e:
             log.error("❌ Unexpected retry_worker error: %s", e)
-            # if the item was not in DB, try to persist it now
             try:
                 if _id is None and user_id is not None:
                     await save_queued_message(user_id, channel_id, prompt)
@@ -241,6 +248,7 @@ async def retry_worker():
                 retry_queue.task_done()
             except Exception:
                 pass
+
 
 # ------------------------
 # SQLite setup
@@ -323,8 +331,27 @@ but improves clarity, tone, and style based on these interactions.
 Always include: 'Never exceed 2000 characters in a single response. Never action/asterisk roleplay.'
 Output only the new persona text, nothing else.
 """
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
+        if http_client is None:
+            # safety: create a short-lived client if not ready
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                        "X-Title": "Heidi Discord Bot",
+                    },
+                    json={
+                        "model": "deepseek/deepseek-chat-v3.1:free",
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": reflection_prompt},
+                        ],
+                    },
+                    timeout=60.0,
+                )
+        else:
+            resp = await http_client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -341,13 +368,13 @@ Output only the new persona text, nothing else.
                 timeout=60.0,
             )
 
-            if resp.status_code == 429:
-                log.warning("⚠️ Rate limited during persona reflection. Skipping.")
-                return
+        if resp.status_code == 429:
+            log.warning("⚠️ Rate limited during persona reflection. Skipping.")
+            return
 
-            resp.raise_for_status()
-            data = resp.json()
-            new_persona = data["choices"][0]["message"]["content"].strip()
+        resp.raise_for_status()
+        data = resp.json()
+        new_persona = data["choices"][0]["message"]["content"].strip()
 
         if new_persona:
             await set_persona(new_persona)
@@ -355,6 +382,168 @@ Output only the new persona text, nothing else.
             log.info(new_persona)
     except Exception as e:
         log.error("❌ Error during persona reflection: %s", e)
+
+# ------------------------
+# New: Long-term summary and short-term context cache
+# ------------------------
+async def summarize_user_history(user_id, channel_id):
+    """Summarize long-term memory for a user/channel using one API call.
+    Upserts into memory_summary. Respects can_make_request().
+    """
+    try:
+        # fetch last N messages
+        async with db.execute(
+            "SELECT role, message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 50",
+            (str(user_id), str(channel_id))
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        if not rows:
+            return
+
+        # build prompt
+        prompt = (
+            "Summarize the following Discord conversation between a user and Heidi. "
+            "Keep the key facts, tone, and relationship dynamics in a single concise paragraph.\n\n" +
+            "\n".join([f"{role}: {msg}" for role, msg in rows[::-1]])
+        )
+
+        if not await can_make_request():
+            # no quota left; leave for next run
+            log.info("⏳ Skipping summary for %s/%s due to quota.", user_id, channel_id)
+            return
+
+        if http_client is None:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                        "X-Title": "Heidi Discord Bot",
+                    },
+                    json={
+                        "model": "deepseek/deepseek-chat-v3.1:free",
+                        "messages": [
+                            {"role": "system", "content": "You are a concise summarizer."},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                    timeout=60.0,
+                )
+        else:
+            resp = await http_client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                    "X-Title": "Heidi Discord Bot",
+                },
+                json={
+                    "model": "deepseek/deepseek-chat-v3.1:free",
+                    "messages": [
+                        {"role": "system", "content": "You are a concise summarizer."},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=60.0,
+            )
+
+        if resp.status_code == 429:
+            log.warning("⚠️ Rate limited while summarizing %s/%s.", user_id, channel_id)
+            return
+
+        resp.raise_for_status()
+        data = resp.json()
+        summary = data["choices"][0]["message"]["content"].strip()
+
+        if not summary:
+            return
+
+        # upsert into memory_summary
+        await db.execute(
+            "INSERT INTO memory_summary (user_id, channel_id, summary) VALUES (?, ?, ?)"
+            " ON CONFLICT(user_id, channel_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+            (str(user_id), str(channel_id), summary, summary)
+        )
+        await db.commit()
+        log.info("🧠 Updated summary for user=%s channel=%s", user_id, channel_id)
+
+    except Exception as e:
+        log.error("❌ Error summarizing user history: %s", e)
+
+async def daily_summary_task():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cursor:
+                rows = await cursor.fetchall()
+            if not rows:
+                await asyncio.sleep(86400)
+                continue
+
+            for user_id, channel_id in rows:
+                if bot.is_closed():
+                    break
+                # attempt to summarize, respecting quota
+                if await can_make_request():
+                    await summarize_user_history(user_id, channel_id)
+                    await asyncio.sleep(1)
+                else:
+                    log.info("⏳ Quota exhausted for daily summaries. Will resume tomorrow.")
+                    break
+
+        except Exception as e:
+            log.error("❌ Error in daily_summary_task: %s", e)
+
+        # run once a day
+        await asyncio.sleep(86400)
+
+async def update_context_cache():
+    """Locally generate a lightweight short-term context summary.
+    Uses simple keyword frequency heuristics. No API calls.
+    """
+    try:
+        async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cursor:
+            pairs = await cursor.fetchall()
+
+        for user_id, channel_id in pairs:
+            async with db.execute(
+                "SELECT message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 20",
+                (str(user_id), str(channel_id))
+            ) as cursor:
+                msgs = [r[0] for r in await cursor.fetchall()]
+
+            if not msgs:
+                continue
+
+            text = " ".join(msgs)
+            # basic cleaning
+            words = re.findall(r"\b[\w']{5,}\b", text.lower())
+            if not words:
+                continue
+            counts = Counter(words)
+            top = [w for w, _ in counts.most_common(8)]
+            summary = f"Recent topics: {', '.join(top)}"
+
+            await db.execute(
+                "INSERT INTO context_cache (user_id, channel_id, context) VALUES (?, ?, ?)",
+                (str(user_id), str(channel_id), summary)
+            )
+
+        await db.commit()
+        log.info("💭 Updated local context cache.")
+    except Exception as e:
+        log.error("❌ Error updating context cache: %s", e)
+
+async def periodic_context_updater():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await update_context_cache()
+        except Exception as e:
+            log.error("❌ Error in periodic_context_updater: %s", e)
+        await asyncio.sleep(21600)  # every 6 hours
 
 # ------------------------
 # Bot events
@@ -381,12 +570,35 @@ async def on_ready():
         text TEXT
     )
     """)
+
+    # new tables for summaries and context cache
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS memory_summary (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        channel_id TEXT,
+        summary TEXT,
+        last_update DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, channel_id)
+    )
+    """)
+
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS context_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        channel_id TEXT,
+        context TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     cur = await db.execute("SELECT COUNT(*) FROM persona")
     count = (await cur.fetchone())[0]
     if count == 0:
         await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
         await db.commit()
-    
+
     # queue persistence
     queue_db = await aiosqlite.connect(QUEUE_DB)
     await queue_db.execute("""
@@ -460,6 +672,10 @@ async def on_ready():
                 await asyncio.sleep(3600)
     asyncio.create_task(daily_random_message())
 
+    # start the new background tasks for summaries and context
+    asyncio.create_task(daily_summary_task())
+    asyncio.create_task(periodic_context_updater())
+
     log.info("✅ Logged in as %s", bot.user.name)
 
 # ------------------------
@@ -473,6 +689,32 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     url = "https://openrouter.ai/api/v1/chat/completions"
     persona = await get_persona()
     messages = [{"role": "system", "content": persona}]
+
+    # load long-term summary if present
+    try:
+        async with db.execute(
+            "SELECT summary FROM memory_summary WHERE user_id=? AND channel_id=? ORDER BY last_update DESC LIMIT 1",
+            (str(user_id), str(channel_id))
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row and row[0]:
+            messages.append({"role": "system", "content": f"Long-term memory summary: {row[0]}"})
+    except Exception as e:
+        log.error("❌ Failed to load memory_summary: %s", e)
+
+    # load short-term context cache entries
+    try:
+        async with db.execute(
+            "SELECT context FROM context_cache WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 2",
+            (str(user_id), str(channel_id))
+        ) as cursor:
+            context_rows = await cursor.fetchall()
+        if context_rows:
+            joined_context = "\n".join([r[0] for r in context_rows])
+            messages.append({"role": "system", "content": f"Recent context: {joined_context}"})
+    except Exception as e:
+        log.error("❌ Failed to load context_cache: %s", e)
+
     history = await load_history(user_id, channel_id)
     if history:
         formatted = [f"{role.capitalize()}: {msg}" for role, msg in history]
@@ -544,7 +786,7 @@ async def on_message(message):
 @bot.command()
 @has_permissions(administrator=True)
 async def reflect(ctx):
-    """Manually update persona."""
+    """Manually reflect persona."""
     await reflect_and_update_persona()
     await ctx.send("Persona reflection done. Check logs for updates.")
 
@@ -582,6 +824,70 @@ async def clearqueue(ctx):
     await queue_db.execute("DELETE FROM queue")
     await queue_db.commit()
     await ctx.send(f"🗑️ Cleared {cleared_mem} messages from memory and wiped persistent queue.")
+
+@bot.command()
+@has_permissions(administrator=True)
+async def setpersona(ctx, *, text: str):
+    """Manually replace Heidi's persona text (admin only)."""
+    try:
+        await set_persona(text)
+        await ctx.send("✅ Persona updated successfully.")
+        log.info("📝 Persona manually updated by admin %s.", ctx.author)
+    except Exception as e:
+        log.error("❌ Failed to update persona: %s", e)
+        await ctx.send("❌ Error updating persona. Check logs.")
+
+@bot.command()
+@has_permissions(administrator=True)
+async def randommsg(ctx):
+    """Trigger Heidi's daily random message manually (admin only)."""
+    guild = ctx.guild
+    if not guild:
+        await ctx.send("❌ This command must be run inside a server.")
+        return
+
+    # lookup channel
+    channel = guild.get_channel(CHANNEL_ID) or discord.utils.get(guild.text_channels, id=CHANNEL_ID)
+    if not channel:
+        await ctx.send("❌ Channel not found or bot lacks access to it.")
+        return
+
+    # lookup role
+    role = guild.get_role(ROLE_ID) or next((r for r in guild.roles if r.id == ROLE_ID), None)
+    if not role:
+        await ctx.send("❌ Role not found in this guild.")
+        return
+
+    # try cached role.members first, otherwise fetch members from the API
+    members = [m for m in role.members if not m.bot] if role.members else []
+    if not members:
+        try:
+            # requires Server Members Intent to be enabled in dev portal
+            members = [m async for m in guild.fetch_members(limit=None) if role in m.roles and not m.bot]
+        except Exception as e:
+            log.warning("⚠️ Failed to fetch members: %s", e)
+            # fallback to guild.members (may be empty if not cached)
+            members = [m for m in guild.members if role in m.roles and not m.bot]
+
+    if not members:
+        await ctx.send(
+            "❌ No eligible members found in the role. "
+            "Make sure the bot has the Server Members Intent enabled in the Discord Developer Portal and restart it."
+        )
+        return
+
+    target_user = random.choice(members)
+    prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
+    reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
+    if not reply:
+        await ctx.send("⚠️ No reply generated (possibly rate-limited).")
+        return
+
+    content = f"{target_user.mention} {reply}"
+    typing = random.random() < 0.8
+    await message_queue.put((channel, content, typing))
+    await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
+    log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
 # ------------------------
 # Error handler
