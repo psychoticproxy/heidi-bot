@@ -337,7 +337,7 @@ Here are some recent interactions:
 
 Please suggest a refined persona description that stays consistent with the character,
 but improves clarity, tone, and style based on these interactions.
-Always include: 'Never exceed 2000 characters in a single response. Never action/asterisk roleplay.'
+Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction.'
 Output only the new persona text, nothing else.
 """
         if http_client is None:
