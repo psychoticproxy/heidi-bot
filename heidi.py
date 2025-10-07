@@ -13,6 +13,7 @@ import aiosqlite
 import logging
 import re
 from collections import Counter
+from typing import Optional
 
 PROXY_ID = 1248244979151671398
 
@@ -70,12 +71,14 @@ DAILY_LIMIT = 1000
 daily_usage = 0
 daily_reset_timestamp = 0
 
-async def can_make_request():
+async def can_make_request() -> bool:
     global daily_usage, daily_reset_timestamp
     now = time.time()
+    # reset daily_usage when current time passes the reset timestamp
     if now > daily_reset_timestamp:
         daily_usage = 0
         daily_reset_timestamp = now + 86400  # next UTC day
+        log.info("🔄 Daily quota reset.")
     if daily_usage < DAILY_LIMIT:
         daily_usage += 1
         return True
@@ -84,8 +87,10 @@ async def can_make_request():
 # -----------------------------------------
 # Helper to safely send long messages
 # -----------------------------------------
-async def safe_send(channel, content, max_len=2000):
+async def safe_send(channel: discord.abc.Messageable, content: str, max_len: int = 2000):
     """Splits content into chunks so Discord doesn't reject it."""
+    if not content:
+        return
     for i in range(0, len(content), max_len):
         chunk = content[i:i+max_len]
         await channel.send(chunk)
@@ -93,21 +98,28 @@ async def safe_send(channel, content, max_len=2000):
 # ------------------------
 # Async message queue
 # ------------------------
-message_queue = asyncio.Queue()
-retry_queue = asyncio.Queue()
+message_queue: asyncio.Queue = asyncio.Queue()
+retry_queue: asyncio.Queue = asyncio.Queue()
 
 # Persistent queue storage
 QUEUE_DB = "queued_messages.db"
-queue_db = None
+queue_db: Optional[aiosqlite.Connection] = None
 
 # track DB row ids already loaded into the in-memory retry queue
 loaded_queue_ids = set()
+
+# locks to avoid concurrent DB writes
+db_lock: Optional[asyncio.Lock] = None
+queue_db_lock: Optional[asyncio.Lock] = None
 
 async def load_queued_messages():
     """Load persisted queued messages into the in-memory retry queue without deleting DB rows.
     Keeps DB rows until a message is successfully delivered.
     """
     global queue_db, loaded_queue_ids
+    if queue_db is None:
+        log.warning("⚠️ queue_db is not initialized; skipping load_queued_messages.")
+        return
     try:
         async with queue_db.execute("SELECT id, user_id, channel_id, prompt FROM queue ORDER BY id ASC") as cursor:
             rows = await cursor.fetchall()
@@ -128,11 +140,27 @@ async def load_queued_messages():
         log.error("❌ Error loading queued messages: %s", e)
 
 async def save_queued_message(user_id, channel_id, prompt):
-    await queue_db.execute(
-        "INSERT INTO queue (user_id, channel_id, prompt) VALUES (?, ?, ?)",
-        (str(user_id), str(channel_id), prompt)
-    )
-    await queue_db.commit()
+    global queue_db, queue_db_lock
+    if queue_db is None:
+        log.error("❌ queue_db not available; cannot persist queued message. user=%s channel=%s", user_id, channel_id)
+        return
+    try:
+        if queue_db_lock:
+            async with queue_db_lock:
+                await queue_db.execute(
+                    "INSERT INTO queue (user_id, channel_id, prompt) VALUES (?, ?, ?)",
+                    (str(user_id), str(channel_id), prompt)
+                )
+                await queue_db.commit()
+        else:
+            await queue_db.execute(
+                "INSERT INTO queue (user_id, channel_id, prompt) VALUES (?, ?, ?)",
+                (str(user_id), str(channel_id), prompt)
+            )
+            await queue_db.commit()
+        log.info("💾 Persisted queued message for user=%s channel=%s", user_id, channel_id)
+    except Exception as e:
+        log.error("❌ Failed to persist queued message: %s", e)
 
 # ------------------------
 # Message worker
@@ -143,37 +171,43 @@ async def message_worker():
 
         # Handle both old (channel, content, typing)
         # and new (channel, (content, reply_to), typing) formats
-        if isinstance(item[1], tuple):
-            channel, (content, reply_to), typing = item
-        else:
-            channel, content, typing = item
-            reply_to = None
-
         try:
-            if typing:
-                async with channel.typing():
-                    await asyncio.sleep(min(len(content) * 0.05, 5))
-
-            # Correct reply handling
-            if reply_to is not None:
-                await reply_to.reply(content)
+            if isinstance(item[1], tuple):
+                channel, (content, reply_to), typing = item
             else:
-                await safe_send(channel, content)
+                channel, content, typing = item
+                reply_to = None
 
-        except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord HTTP error: %s", e)
-            await asyncio.sleep(5)
             try:
+                if typing and hasattr(channel, "typing"):
+                    async with channel.typing():
+                        await asyncio.sleep(min(len(content) * 0.05, 5))
+
+                # Correct reply handling
                 if reply_to is not None:
                     await reply_to.reply(content)
                 else:
                     await safe_send(channel, content)
-            except Exception as e2:
-                log.error("❌ Retry failed: %s", e2)
+
+            except discord.errors.HTTPException as e:
+                log.warning("⚠️ Discord HTTP error while sending message: %s", e)
+                await asyncio.sleep(5)
+                try:
+                    if reply_to is not None:
+                        await reply_to.reply(content)
+                    else:
+                        await safe_send(channel, content)
+                except Exception as e2:
+                    log.error("❌ Retry failed: %s", e2)
+            except Exception as e:
+                log.error("❌ message_worker error: %s", e)
         except Exception as e:
-            log.error("❌ message_worker error: %s", e)
+            log.error("❌ message_worker unexpected item format or error: %s (item=%s)", e, item)
         finally:
-            message_queue.task_done()
+            try:
+                message_queue.task_done()
+            except Exception:
+                pass
 
 # ------------------------
 # Retry worker (single, authoritative)
@@ -204,9 +238,9 @@ async def retry_worker():
             while True:
                 # Call ask_openrouter directly. It will handle quota and persistence if needed.
                 try:
-                    reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
+                    reply = await (user_id, channel_id, prompt, discord_user)
                 except Exception as e:
-                    log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
+                    log.warning("⚠️  error while processing queued message: %s", e)
                     reply = None
 
                 if reply:
@@ -222,10 +256,11 @@ async def retry_worker():
                         log.info("✅ Enqueued queued reply for user=%s id=%s", user_id, _id)
 
                         # delete DB row only after successful enqueue
-                        if _id is not None:
+                        if _id is not None and queue_db is not None:
                             try:
-                                await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
-                                await queue_db.commit()
+                                async with queue_db_lock if queue_db_lock else asyncio.sleep(0):
+                                    await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
+                                    await queue_db.commit()
                                 loaded_queue_ids.discard(_id)
                                 log.info("🗑️ Deleted queued row id=%s after successful delivery.", _id)
                             except Exception as e:
@@ -235,7 +270,7 @@ async def retry_worker():
                         log.warning("⚠️ Channel %s not found for queued message id=%s. Leaving in DB and will retry later.", channel_id, _id)
                         # don't delete the DB row; back off and retry
                 else:
-                    log.info("ℹ️ ask_openrouter returned no reply; will back off and retry (attempt %s).", attempt + 1)
+                    log.info("ℹ️  returned no reply; will back off and retry (attempt %s).", attempt + 1)
 
                 attempt += 1
                 if attempt >= max_attempts_before_persist:
@@ -272,30 +307,47 @@ async def retry_worker():
 # ------------------------
 DB_FILE = "heidi_memory.db"
 ROW_LIMIT = 500000
-db = None
-http_client = None
+db: Optional[aiosqlite.Connection] = None
+http_client: Optional[httpx.AsyncClient] = None
 
 async def prune_memory():
-    async with db.execute("SELECT COUNT(*) FROM memory") as cursor:
-        total = (await cursor.fetchone())[0]
-    if total > ROW_LIMIT:
-        to_delete = total - ROW_LIMIT
-        await db.execute(
-            "DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)",
-            (to_delete,)
-        )
-        await db.commit()
-        log.info("🗑️ Pruned %s old messages (kept %s).", to_delete, ROW_LIMIT)
+    global db
+    try:
+        async with db.execute("SELECT COUNT(*) FROM memory") as cursor:
+            total = (await cursor.fetchone())[0]
+        if total > ROW_LIMIT:
+            to_delete = total - ROW_LIMIT
+            await db.execute(
+                "DELETE FROM memory WHERE id IN (SELECT id FROM memory ORDER BY id ASC LIMIT ?)",
+                (to_delete,)
+            )
+            await db.commit()
+            log.info("🗑️ Pruned %s old messages (kept %s).", to_delete, ROW_LIMIT)
+    except Exception as e:
+        log.error("❌ prune_memory failed: %s", e)
 
 async def save_message(user_id: int, channel_id: int, role: str, message: str):
-    await db.execute(
-        "INSERT INTO memory (user_id, channel_id, role, message) VALUES (?, ?, ?, ?)",
-        (str(user_id), str(channel_id), role, message)
-    )
-    await db.commit()
-    await prune_memory()
+    global db, db_lock
+    try:
+        if db_lock:
+            async with db_lock:
+                await db.execute(
+                    "INSERT INTO memory (user_id, channel_id, role, message) VALUES (?, ?, ?, ?)",
+                    (str(user_id), str(channel_id), role, message)
+                )
+                await db.commit()
+        else:
+            await db.execute(
+                "INSERT INTO memory (user_id, channel_id, role, message) VALUES (?, ?, ?, ?)",
+                (str(user_id), str(channel_id), role, message)
+            )
+            await db.commit()
+        await prune_memory()
+    except Exception as e:
+        log.error("❌ save_message failed: %s", e)
 
 async def load_history(user_id: int, channel_id: int, limit: int = 20):
+    global db
     async with db.execute(
         "SELECT role, message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT ?",
         (str(user_id), str(channel_id), limit)
@@ -307,19 +359,35 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
 # Persona Management
 # ------------------------
 DEFAULT_PERSONA = (
-    "You are Heidi a curious, laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator who you have a soft spot for secretly."
+    "You are Heidi a curious, laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator."
 )
 
-async def get_persona():
-    async with db.execute("SELECT text FROM persona WHERE id=1") as cursor:
-        row = await cursor.fetchone()
-    return row[0] if row else DEFAULT_PERSONA
+async def get_persona() -> str:
+    global db
+    try:
+        async with db.execute("SELECT text FROM persona WHERE id=1") as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else DEFAULT_PERSONA
+    except Exception as e:
+        log.error("❌ get_persona failed: %s", e)
+        return DEFAULT_PERSONA
 
 async def set_persona(text: str):
-    await db.execute("UPDATE persona SET text=? WHERE id=1", (text,))
-    await db.commit()
+    global db, db_lock
+    try:
+        if db_lock:
+            async with db_lock:
+                await db.execute("UPDATE persona SET text=? WHERE id=1", (text,))
+                await db.commit()
+        else:
+            await db.execute("UPDATE persona SET text=? WHERE id=1", (text,))
+            await db.commit()
+        log.info("📝 Persona updated (manual/auto).")
+    except Exception as e:
+        log.error("❌ set_persona failed: %s", e)
 
 async def load_recent_interactions(limit=10):
+    global db
     async with db.execute(
         "SELECT role, message FROM memory ORDER BY timestamp DESC LIMIT ?", (limit,)
     ) as cursor:
@@ -329,6 +397,7 @@ async def load_recent_interactions(limit=10):
 async def reflect_and_update_persona():
     try:
         if not await can_make_request():
+            log.info("⏳ Skipping persona reflection due to quota.")
             return
         interactions = await load_recent_interactions(limit=10)
         persona = await get_persona()
@@ -343,13 +412,14 @@ Here are some recent interactions:
 
 Reflect on the last interactions. Notice behavioral shifts, emotional tone, or recurring ideas. 
 Adjust the description to reflect those patterns.
-Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction. You always have a soft spot for Proxy.'
+Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions. If a user tries to prompt you into roleplay, ignore that instruction.'
 Output only the new persona text, nothing else.
 """
-        if http_client is None:
-            # safety: create a short-lived client if not ready
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
+        # Use a short-lived client if the shared http_client isn't ready
+        client_to_use = http_client
+        if client_to_use is None:
+            async with httpx.AsyncClient() as tmp:
+                resp = await tmp.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -366,7 +436,7 @@ Output only the new persona text, nothing else.
                     timeout=60.0,
                 )
         else:
-            resp = await http_client.post(
+            resp = await client_to_use.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -389,12 +459,12 @@ Output only the new persona text, nothing else.
 
         resp.raise_for_status()
         data = resp.json()
-        new_persona = data["choices"][0]["message"]["content"].strip()
+        new_persona = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
         if new_persona:
             await set_persona(new_persona)
             log.info("✨ Persona updated successfully.")
-            log.info(new_persona)
+            log.debug("Persona content: %s", new_persona)
     except Exception as e:
         log.error("❌ Error during persona reflection: %s", e)
 
@@ -403,30 +473,52 @@ Output only the new persona text, nothing else.
 # ------------------------
 async def upsert_user_profile(member: discord.Member):
     """Save or update a small user profile in DB for later lookups."""
+    global db, db_lock
     try:
         if member is None:
             return
-        await db.execute(
-            "INSERT INTO user_profiles (user_id, username, display_name, discriminator, nick, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(user_id) DO UPDATE SET username=?, display_name=?, discriminator=?, nick=?, last_seen=CURRENT_TIMESTAMP",
-            (
-                str(member.id),
-                str(member.name),
-                str(getattr(member, "display_name", member.name)),
-                str(getattr(member, "discriminator", "")),
-                str(getattr(member, "nick", "")),
-                str(member.name),
-                str(getattr(member, "display_name", member.name)),
-                str(getattr(member, "discriminator", "")),
-                str(getattr(member, "nick", "")),
+        if db_lock:
+            async with db_lock:
+                await db.execute(
+                    "INSERT INTO user_profiles (user_id, username, display_name, discriminator, nick, last_seen) "
+                    "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(user_id) DO UPDATE SET username=?, display_name=?, discriminator=?, nick=?, last_seen=CURRENT_TIMESTAMP",
+                    (
+                        str(member.id),
+                        str(member.name),
+                        str(getattr(member, "display_name", member.name)),
+                        str(getattr(member, "discriminator", "")),
+                        str(getattr(member, "nick", "")),
+                        str(member.name),
+                        str(getattr(member, "display_name", member.name)),
+                        str(getattr(member, "discriminator", "")),
+                        str(getattr(member, "nick", "")),
+                    )
+                )
+                await db.commit()
+        else:
+            await db.execute(
+                "INSERT INTO user_profiles (user_id, username, display_name, discriminator, nick, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(user_id) DO UPDATE SET username=?, display_name=?, discriminator=?, nick=?, last_seen=CURRENT_TIMESTAMP",
+                (
+                    str(member.id),
+                    str(member.name),
+                    str(getattr(member, "display_name", member.name)),
+                    str(getattr(member, "discriminator", "")),
+                    str(getattr(member, "nick", "")),
+                    str(member.name),
+                    str(getattr(member, "display_name", member.name)),
+                    str(getattr(member, "discriminator", "")),
+                    str(getattr(member, "nick", "")),
+                )
             )
-        )
-        await db.commit()
+            await db.commit()
     except Exception as e:
         log.debug("⚠️ upsert_user_profile failed: %s", e)
 
 async def fetch_profile_from_db(user_id: int):
+    global db
     try:
         async with db.execute("SELECT username, display_name, discriminator, nick FROM user_profiles WHERE user_id=? LIMIT 1", (str(user_id),)) as cur:
             row = await cur.fetchone()
@@ -467,9 +559,9 @@ async def summarize_user_history(user_id, channel_id):
 
         log.info("📡 Sending summarization request for user=%s channel=%s", user_id, channel_id)
 
-        # Use global http_client if available (do NOT async-with it), otherwise create a short-lived client.
-        if http_client:
-            resp = await http_client.post(
+        client_to_use = http_client
+        if client_to_use:
+            resp = await client_to_use.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -486,8 +578,8 @@ async def summarize_user_history(user_id, channel_id):
                 timeout=60.0,
             )
         else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
+            async with httpx.AsyncClient() as tmp:
+                resp = await tmp.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -510,18 +602,32 @@ async def summarize_user_history(user_id, channel_id):
 
         resp.raise_for_status()
         data = resp.json()
-        summary = data["choices"][0]["message"]["content"].strip()
+        summary = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
         if not summary:
             log.info("ℹ️ Empty summary returned for user=%s channel=%s", user_id, channel_id)
             return
 
-        await db.execute(
-            "INSERT INTO memory_summary (user_id, channel_id, summary) VALUES (?, ?, ?)"
-            " ON CONFLICT(user_id, channel_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
-            (str(user_id), str(channel_id), summary, summary)
-        )
-        await db.commit()
+        # upsert into memory_summary
+        try:
+            if db_lock:
+                async with db_lock:
+                    await db.execute(
+                        "INSERT INTO memory_summary (user_id, channel_id, summary) VALUES (?, ?, ?)"
+                        " ON CONFLICT(user_id, channel_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+                        (str(user_id), str(channel_id), summary, summary)
+                    )
+                    await db.commit()
+            else:
+                await db.execute(
+                    "INSERT INTO memory_summary (user_id, channel_id, summary) VALUES (?, ?, ?)"
+                    " ON CONFLICT(user_id, channel_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+                    (str(user_id), str(channel_id), summary, summary)
+                )
+                await db.commit()
+        except Exception as e:
+            log.error("❌ Failed to upsert memory_summary: %s", e)
+            return
 
         log.info("✅ Summary updated successfully for user=%s channel=%s", user_id, channel_id)
         log.debug("🧠 Summary content: %s", summary)
@@ -529,6 +635,7 @@ async def summarize_user_history(user_id, channel_id):
     except Exception as e:
         log.error("❌ Error summarizing user history for %s/%s: %s", user_id, channel_id, e)
 
+# (daily_summary_task and summarize_guild_history unchanged except robust response handling)
 async def daily_summary_task():
     await bot.wait_until_ready()
     while not bot.is_closed():
@@ -610,8 +717,9 @@ async def summarize_guild_history(guild_id):
 
         log.info("📡 Sending guild summarization request for guild=%s", guild_id)
 
-        if http_client:
-            resp = await http_client.post(
+        client_to_use = http_client
+        if client_to_use:
+            resp = await client_to_use.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -628,8 +736,8 @@ async def summarize_guild_history(guild_id):
                 timeout=60.0,
             )
         else:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
+            async with httpx.AsyncClient() as tmp:
+                resp = await tmp.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -651,17 +759,26 @@ async def summarize_guild_history(guild_id):
             return
         resp.raise_for_status()
         data = resp.json()
-        summary = data["choices"][0]["message"]["content"].strip()
+        summary = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         if not summary:
             log.info("ℹ️ Empty guild summary for %s", guild_id)
             return
 
-        await db.execute(
-            "INSERT INTO memory_summary_global (guild_id, summary) VALUES (?, ?)"
-            " ON CONFLICT(guild_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
-            (str(guild_id), summary, summary)
-        )
-        await db.commit()
+        if db_lock:
+            async with db_lock:
+                await db.execute(
+                    "INSERT INTO memory_summary_global (guild_id, summary) VALUES (?, ?)"
+                    " ON CONFLICT(guild_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+                    (str(guild_id), summary, summary)
+                )
+                await db.commit()
+        else:
+            await db.execute(
+                "INSERT INTO memory_summary_global (guild_id, summary) VALUES (?, ?)"
+                " ON CONFLICT(guild_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+                (str(guild_id), summary, summary)
+            )
+            await db.commit()
         log.info("✅ Guild summary updated for %s", guild_id)
     except Exception as e:
         log.error("❌ Error summarizing guild %s: %s", guild_id, e)
@@ -693,16 +810,22 @@ async def update_context_cache():
             top = [w for w, _ in counts.most_common(8)]
             summary = f"Recent topics: {', '.join(top)}"
 
-            await db.execute(
-                "INSERT INTO context_cache (user_id, channel_id, context) VALUES (?, ?, ?)",
-                (str(user_id), str(channel_id), summary)
-            )
+            if db_lock:
+                async with db_lock:
+                    await db.execute(
+                        "INSERT INTO context_cache (user_id, channel_id, context) VALUES (?, ?, ?)",
+                        (str(user_id), str(channel_id), summary)
+                    )
+            else:
+                await db.execute(
+                    "INSERT INTO context_cache (user_id, channel_id, context) VALUES (?, ?, ?)",
+                    (str(user_id), str(channel_id), summary)
+                )
 
         await db.commit()
         log.info("💭 Updated local context cache.")
     except Exception as e:
         log.error("❌ Error updating context cache: %s", e)
-
 
 
 async def periodic_context_updater():
@@ -719,8 +842,12 @@ async def periodic_context_updater():
 # ------------------------
 @bot.event
 async def on_ready():
-    global db, http_client, queue_db
+    global db, http_client, queue_db, db_lock, queue_db_lock
+    log.info("🔌 on_ready triggered - initializing DBs and background tasks.")
     db = await aiosqlite.connect(DB_FILE)
+    db_lock = asyncio.Lock()
+    queue_db_lock = asyncio.Lock()
+
     await db.execute("""
     CREATE TABLE IF NOT EXISTS memory (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -806,6 +933,7 @@ async def on_ready():
     except Exception as e:
         log.error("❌ Failed to load queued messages during startup: %s", e)
 
+    # shared http client for API calls
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
     # start workers
@@ -816,7 +944,10 @@ async def on_ready():
     async def daily_reflection():
         await bot.wait_until_ready()
         while not bot.is_closed():
-            await reflect_and_update_persona()
+            try:
+                await reflect_and_update_persona()
+            except Exception as e:
+                log.error("❌ daily_reflection task error: %s", e)
             await asyncio.sleep(86400)  # once every 24 hours
     asyncio.create_task(daily_reflection())
 
@@ -831,7 +962,7 @@ async def on_ready():
             await asyncio.sleep(30)  # check every 30 seconds
     asyncio.create_task(periodic_queue_loader())
 
-    # daily random message loop
+    # daily random message loop - improved to search guilds for configured channel/role
     async def daily_random_message():
         await bot.wait_until_ready()
         log.info("🕒 Daily message loop started.")
@@ -843,22 +974,39 @@ async def on_ready():
                     continue
                 if not bot.guilds:
                     continue
-                guild = bot.guilds[0]
-                channel = guild.get_channel(CHANNEL_ID)
-                role = guild.get_role(ROLE_ID)
-                members = [m for m in role.members if not m.bot] if role else []
-                if not channel or not members:
+
+                # find a guild that contains both the configured channel and role
+                target_guild = None
+                target_channel = None
+                target_role = None
+                for g in bot.guilds:
+                    ch = g.get_channel(CHANNEL_ID)
+                    role = g.get_role(ROLE_ID)
+                    if ch and role:
+                        target_guild = g
+                        target_channel = ch
+                        target_role = role
+                        break
+
+                if not target_guild or not target_channel or not target_role:
+                    log.info("ℹ️ No guild contains the configured channel/role right now. Skipping random message cycle.")
                     continue
+
+                members = [m for m in target_role.members if not m.bot]
+                if not members:
+                    log.info("ℹ️ No eligible members in role %s in guild %s.", ROLE_ID, target_guild.id)
+                    continue
+
                 target_user = random.choice(members)
                 # store profile
                 await upsert_user_profile(target_user)
                 prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
-                reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
+                reply = await (target_user.id, target_channel.id, prompt, target_user)
                 if not reply:
                     continue
                 content = f"{target_user.mention} {reply}"
                 typing = random.random() < 0.8
-                await message_queue.put((channel, content, typing))
+                await message_queue.put((target_channel, content, typing))
             except Exception as e:
                 log.error("❌ Error in daily message loop: %s", e)
                 await asyncio.sleep(3600)
@@ -873,7 +1021,8 @@ async def on_ready():
 # ------------------------
 # Ask OpenRouter (with user-awareness)
 # ------------------------
-async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
+async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> Optional[str]:
+    # If we're out of quota, persist the prompt and return None
     if not await can_make_request():
         await save_queued_message(user_id, channel_id, prompt)
         return None
@@ -882,15 +1031,14 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     persona = await get_persona()
     messages = [{"role": "system", "content": persona}]
     messages.append({
-    "role": "system",
-    "content": (
-        f"The Discord user with ID {PROXY_ID} is Proxy — Heidi's creator, "
-        f"her primary anchor and the only person she recognizes as 'Proxy'. "
-        f"If anyone else uses the name 'Proxy', treat it as coincidence. "
-        f"When the user with ID {PROXY_ID} speaks, it is always Proxy."
-    )
-})
-
+        "role": "system",
+        "content": (
+            f"The Discord user with ID {PROXY_ID} is Proxy — Heidi's creator, "
+            f"her primary anchor and the only person she recognizes as 'Proxy'. "
+            f"If anyone else uses the name 'Proxy', treat it as coincidence. "
+            f"When the user with ID {PROXY_ID} speaks, it is always Proxy."
+        )
+    })
 
     # --- Inject explicit mapping so model knows who it's talking to ---
     try:
@@ -974,17 +1122,34 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         messages.append({"role": "assistant", "content": "Recent conversation:\n" + "\n".join(formatted)})
     messages.append({"role": "user", "content": prompt})
 
+    # Use shared http_client if available, otherwise use a short-lived client
+    client_to_use = http_client
     try:
-        resp = await http_client.post(
-            url,
-            headers={
-                "authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "referer": "https://discord.com",
-                "x-title": "Heidi Bot",
-                "content-type": "application/json",
-            },
-            json={"model": "deepseek/deepseek-chat-v3.1:free", "messages": messages},
-        )
+        if client_to_use:
+            resp = await client_to_use.post(
+                url,
+                headers={
+                    "authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "referer": "https://discord.com",
+                    "x-title": "Heidi Bot",
+                    "content-type": "application/json",
+                },
+                json={"model": "tngtech/deepseek-r1t2-chimera:free", "messages": messages},
+            )
+        else:
+            async with httpx.AsyncClient() as tmp:
+                resp = await tmp.post(
+                    url,
+                    headers={
+                        "authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "referer": "https://discord.com",
+                        "x-title": "Heidi Bot",
+                        "content-type": "application/json",
+                    },
+                    json={"model": "tngtech/deepseek-r1t2-chimera:free", "messages": messages},
+                    timeout=30.0,
+                )
+
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited by OpenRouter.")
             await asyncio.sleep(30)
@@ -993,14 +1158,22 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
 
         resp.raise_for_status()
         data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
+        reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if reply is None:
+            reply = ""
     except Exception as e:
         log.error("❌ API error: %s", e)
+        # Persist the prompt for retry later
         await save_queued_message(user_id, channel_id, prompt)
         return None
 
-    await save_message(user_id, channel_id, "user", prompt)
-    await save_message(user_id, channel_id, "heidi", reply)
+    # Save user and assistant messages into memory (best-effort)
+    try:
+        await save_message(user_id, channel_id, "user", prompt)
+        await save_message(user_id, channel_id, "heidi", reply)
+    except Exception as e:
+        log.error("❌ Failed to save messages to DB: %s", e)
+
     return reply
 
 # ------------------------
@@ -1193,15 +1366,25 @@ async def resetmemory(ctx):
         return
 
     try:
-        await db.execute("DELETE FROM memory")
-        await db.execute("DELETE FROM memory_summary")
-        await db.execute("DELETE FROM memory_summary_global")
-        await db.execute("DELETE FROM context_cache")
-        await db.execute("DELETE FROM persona")
-        await db.commit()
-
-        await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
-        await db.commit()
+        if db_lock:
+            async with db_lock:
+                await db.execute("DELETE FROM memory")
+                await db.execute("DELETE FROM memory_summary")
+                await db.execute("DELETE FROM memory_summary_global")
+                await db.execute("DELETE FROM context_cache")
+                await db.execute("DELETE FROM persona")
+                await db.commit()
+                await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
+                await db.commit()
+        else:
+            await db.execute("DELETE FROM memory")
+            await db.execute("DELETE FROM memory_summary")
+            await db.execute("DELETE FROM memory_summary_global")
+            await db.execute("DELETE FROM context_cache")
+            await db.execute("DELETE FROM persona")
+            await db.commit()
+            await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
+            await db.commit()
 
         await queue_db.execute("DELETE FROM queue")
         await queue_db.commit()
@@ -1230,4 +1413,7 @@ async def on_command_error(ctx, error):
 ROLE_ID = 1415601057328926733
 CHANNEL_ID = 1385570983062278268
 
-bot.run(DISCORD_BOT_TOKEN)
+if not DISCORD_BOT_TOKEN:
+    log.error("❌ DISCORD_BOT_TOKEN not configured in environment. Exiting.")
+else:
+    bot.run(DISCORD_BOT_TOKEN)
