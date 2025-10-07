@@ -1,4 +1,3 @@
-# heidi_bot.py
 import threading
 from flask import Flask
 import os
@@ -14,6 +13,8 @@ import aiosqlite
 import logging
 import re
 from collections import Counter
+
+PROXY_ID = 1248244979151671398
 
 # ------------------------
 # Logging setup
@@ -880,6 +881,16 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     url = "https://openrouter.ai/api/v1/chat/completions"
     persona = await get_persona()
     messages = [{"role": "system", "content": persona}]
+    messages.append({
+    "role": "system",
+    "content": (
+        f"The Discord user with ID {PROXY_ID} is Proxy — Heidi's creator, "
+        f"her primary anchor and the only person she recognizes as 'Proxy'. "
+        f"If anyone else uses the name 'Proxy', treat it as coincidence. "
+        f"When the user with ID {PROXY_ID} speaks, it is always Proxy."
+    )
+})
+
 
     # --- Inject explicit mapping so model knows who it's talking to ---
     try:
