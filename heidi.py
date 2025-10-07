@@ -179,13 +179,15 @@ async def message_worker():
                 reply_to = None
 
             try:
-                if typing and hasattr(channel, "typing"):
-                    async with channel.typing():
+                # If we're replying to a message, typing should show in that message's channel.
+                typing_channel = reply_to.channel if reply_to is not None else channel
+                if typing and hasattr(typing_channel, "typing"):
+                    async with typing_channel.typing():
                         await asyncio.sleep(min(len(content) * 0.05, 5))
 
-                # Correct reply handling
+                # Correct reply handling: when replying to a message, don't mention the author
                 if reply_to is not None:
-                    await reply_to.reply(content)
+                    await reply_to.reply(content, mention_author=False)
                 else:
                     await safe_send(channel, content)
 
@@ -194,7 +196,7 @@ async def message_worker():
                 await asyncio.sleep(5)
                 try:
                     if reply_to is not None:
-                        await reply_to.reply(content)
+                        await reply_to.reply(content, mention_author=False)
                     else:
                         await safe_send(channel, content)
                 except Exception as e2:
@@ -1199,16 +1201,18 @@ async def on_message(message):
 
         user_cooldowns[message.author.id] = now
 
-        user_input = message.content.replace(f"<@{bot.user.id}>", "").strip() or "What?"
+        # remove both <@123> and <@!123> mention forms robustly
+        user_input = re.sub(rf"<@!?\s*{bot.user.id}\s*>", "", message.content).strip() or "What?"
         delay = random.uniform(2, 20)
         await asyncio.sleep(delay)
 
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
         if reply:
-            content = f"{message.author.mention} {reply}"
+            # Do NOT include a mention when replying to a user's message.
+            # Put the tuple (content, reply_to_message) so message_worker can reply without mentioning.
             typing = random.random() < 0.8
-            await message_queue.put((message.channel, (content, message), typing))
+            await message_queue.put((message.channel, (reply, message), typing))
 
     await bot.process_commands(message)
 
