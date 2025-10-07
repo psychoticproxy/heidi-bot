@@ -1048,7 +1048,7 @@ async def on_ready():
                 reply = await ask_openrouter(target_user.id, target_channel.id, prompt, target_user)
                 if not reply:
                     continue
-                content = f"{target_user.mention} {reply}"
+                content = reply.strip()
                 typing = random.random() < 0.8
                 await message_queue.put((target_channel, content, typing))
             except Exception as e:
@@ -1355,12 +1355,12 @@ async def randommsg(ctx):
         await ctx.send("⚠️ No reply generated (possibly rate-limited).")
         return
 
-    content = f"{target_user.mention} {reply}"
+    content = reply.strip()
     typing = random.random() < 0.8
 
     # send message to the target channel, not as a reply
-    await message_queue.put((channel, content.strip(), typing))
-
+    await message_queue.put((channel, content, typing))
+    
     await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
