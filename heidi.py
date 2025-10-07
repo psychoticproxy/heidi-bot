@@ -1,3 +1,4 @@
+# heidi_bot.py
 import threading
 from flask import Flask
 import os
@@ -397,6 +398,45 @@ Output only the new persona text, nothing else.
         log.error("❌ Error during persona reflection: %s", e)
 
 # ------------------------
+# User profile helpers (store latest names)
+# ------------------------
+async def upsert_user_profile(member: discord.Member):
+    """Save or update a small user profile in DB for later lookups."""
+    try:
+        if member is None:
+            return
+        await db.execute(
+            "INSERT INTO user_profiles (user_id, username, display_name, discriminator, nick, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(user_id) DO UPDATE SET username=?, display_name=?, discriminator=?, nick=?, last_seen=CURRENT_TIMESTAMP",
+            (
+                str(member.id),
+                str(member.name),
+                str(getattr(member, "display_name", member.name)),
+                str(getattr(member, "discriminator", "")),
+                str(getattr(member, "nick", "")),
+                str(member.name),
+                str(getattr(member, "display_name", member.name)),
+                str(getattr(member, "discriminator", "")),
+                str(getattr(member, "nick", "")),
+            )
+        )
+        await db.commit()
+    except Exception as e:
+        log.debug("⚠️ upsert_user_profile failed: %s", e)
+
+async def fetch_profile_from_db(user_id: int):
+    try:
+        async with db.execute("SELECT username, display_name, discriminator, nick FROM user_profiles WHERE user_id=? LIMIT 1", (str(user_id),)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return {"username": row[0], "display_name": row[1], "discriminator": row[2], "nick": row[3]}
+    except Exception as e:
+        log.debug("⚠️ fetch_profile_from_db failed: %s", e)
+        return None
+
+# ------------------------
 # New: Long-term summary and short-term context cache
 # ------------------------
 async def summarize_user_history(user_id, channel_id):
@@ -507,6 +547,7 @@ async def daily_summary_task():
                 await summarize_user_history(user_id, channel_id)
                 await asyncio.sleep(1)
 
+            # gather guild ids from cached channels that appear in memory
             async with db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
                 chan_rows = await cur.fetchall()
 
@@ -729,6 +770,18 @@ async def on_ready():
     )
     """)
 
+    # user profiles table to remember latest display names
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS user_profiles (
+        user_id TEXT PRIMARY KEY,
+        username TEXT,
+        display_name TEXT,
+        discriminator TEXT,
+        nick TEXT,
+        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     cur = await db.execute("SELECT COUNT(*) FROM persona")
     count = (await cur.fetchone())[0]
     if count == 0:
@@ -796,6 +849,8 @@ async def on_ready():
                 if not channel or not members:
                     continue
                 target_user = random.choice(members)
+                # store profile
+                await upsert_user_profile(target_user)
                 prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
                 reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
                 if not reply:
@@ -815,7 +870,7 @@ async def on_ready():
     log.info("✅ Logged in as %s", bot.user.name)
 
 # ------------------------
-# Ask OpenRouter
+# Ask OpenRouter (with user-awareness)
 # ------------------------
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> str:
     if not await can_make_request():
@@ -826,7 +881,41 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     persona = await get_persona()
     messages = [{"role": "system", "content": persona}]
 
-    # load long-term summary if present
+    # --- Inject explicit mapping so model knows who it's talking to ---
+    try:
+        profile = None
+        if discord_user:
+            # prefer the live Member object
+            display = getattr(discord_user, "display_name", None) or getattr(discord_user, "name", str(discord_user))
+            username = getattr(discord_user, "name", display)
+            profile = {"username": username, "display_name": display, "id": str(discord_user.id)}
+            # persist profile for later
+            try:
+                await upsert_user_profile(discord_user)
+            except Exception:
+                pass
+        else:
+            # try DB lookup by id
+            prof = await fetch_profile_from_db(user_id)
+            if prof:
+                profile = {"username": prof.get("username"), "display_name": prof.get("display_name"), "id": str(user_id)}
+
+        if profile:
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"Conversation participant mapping:\n"
+                    f"- id: {profile['id']}\n"
+                    f"- username: {profile.get('username')}\n"
+                    f"- display_name: {profile.get('display_name')}\n"
+                    f"When addressing them directly prefer their display_name. Use mentions in Discord format: <@{profile['id']}>.\n"
+                    f"Treat this mapping as authoritative for this conversation."
+                )
+            })
+    except Exception as e:
+        log.debug("⚠️ Failed to attach user mapping: %s", e)
+
+    # load long-term summary if present (per-user/channel)
     try:
         async with db.execute(
             "SELECT summary FROM memory_summary WHERE user_id=? AND channel_id=? ORDER BY last_update DESC LIMIT 1",
@@ -838,7 +927,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     except Exception as e:
         log.error("❌ Failed to load memory_summary: %s", e)
 
-        # load global guild summary if possible
+    # load global guild summary if possible
     try:
         chan = bot.get_channel(int(channel_id))
         if chan and chan.guild:
@@ -849,6 +938,9 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
                 row = await cursor.fetchone()
             if row and row[0]:
                 messages.append({"role": "system", "content": f"Server-wide memory: {row[0]}"})
+
+            # also provide channel/guild context
+            messages.append({"role": "system", "content": f"Channel: {getattr(chan, 'name', str(channel_id))}, Guild: {getattr(chan.guild, 'name', '')}, guild_id: {gid}"})
     except Exception as e:
         log.error("❌ Failed to load memory_summary_global: %s", e)
 
@@ -907,6 +999,12 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
 async def on_message(message):
     if message.author == bot.user:
         return
+
+    # Always upsert profile when we see a user (keeps display_name fresh)
+    try:
+        await upsert_user_profile(message.author)
+    except Exception:
+        pass
 
     if bot.user in message.mentions:
         now = time.time()
@@ -996,7 +1094,7 @@ async def randommsg(ctx):
         await ctx.send("❌ This command must be run inside a server.")
         return
 
-    target_channel_id = 1385570983062278268
+    target_channel_id = CHANNEL_ID
     role_id = ROLE_ID  # reuse your configured role
 
     channel = guild.get_channel(target_channel_id)
@@ -1015,6 +1113,12 @@ async def randommsg(ctx):
         return
 
     target_user = random.choice(members)
+    # store profile immediately
+    try:
+        await upsert_user_profile(target_user)
+    except Exception:
+        pass
+
     prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
     reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
     if not reply:
