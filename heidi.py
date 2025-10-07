@@ -1414,7 +1414,7 @@ async def on_command_error(ctx, error):
 # ------------------------
 # Run bot
 # ------------------------
-ROLE_ID = 1415601057328926733
+ROLE_ID = 1425102962556145676
 CHANNEL_ID = 1385570983062278268
 
 if not DISCORD_BOT_TOKEN:
