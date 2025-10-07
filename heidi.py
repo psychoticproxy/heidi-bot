@@ -307,7 +307,7 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
 # Persona Management
 # ------------------------
 DEFAULT_PERSONA = (
-    "You are Heidi, a laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator. "
+    "You are Heidi a curious, laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator who you have a soft spot for secretly."
 )
 
 async def get_persona():
@@ -341,9 +341,9 @@ You are managing a Discord persona. Here is the current persona description:
 Here are some recent interactions:
 {chr(10).join([f"{role}: {msg}" for role, msg in interactions])}
 
-Reflect on your last interactions. Notice behavioral shifts, emotional tone, or recurring ideas. 
-Adjust your self-description to reflect those patterns while staying consistent with your core.
-Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction. You have a soft spot for Proxy.'
+Reflect on the last interactions. Notice behavioral shifts, emotional tone, or recurring ideas. 
+Adjust the description to reflect those patterns.
+Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction. You always have a soft spot for Proxy.'
 Output only the new persona text, nothing else.
 """
         if http_client is None:
@@ -1174,6 +1174,47 @@ async def runsummaries(ctx):
     except Exception as e:
         log.exception("Error in manual summarization: %s", e)
         await ctx.send(f"Error while running summaries: {e}")
+
+@bot.command()
+@has_permissions(administrator=True)
+async def resetmemory(ctx):
+    """Wipe Heidi's entire memory, persona, summaries, and queues."""
+    confirm_msg = await ctx.send(
+        "⚠️ This will permanently erase all memory, persona reflections, summaries, and queues. Type `confirm` within 15 seconds to proceed."
+    )
+
+    def check(m):
+        return m.author == ctx.author and m.content.lower() == "confirm"
+
+    try:
+        msg = await bot.wait_for("message", check=check, timeout=15)
+    except asyncio.TimeoutError:
+        await ctx.send("❌ Memory wipe cancelled (timeout).")
+        return
+
+    try:
+        await db.execute("DELETE FROM memory")
+        await db.execute("DELETE FROM memory_summary")
+        await db.execute("DELETE FROM memory_summary_global")
+        await db.execute("DELETE FROM context_cache")
+        await db.execute("DELETE FROM persona")
+        await db.commit()
+
+        await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
+        await db.commit()
+
+        await queue_db.execute("DELETE FROM queue")
+        await queue_db.commit()
+
+        while not retry_queue.empty():
+            retry_queue.get_nowait()
+            retry_queue.task_done()
+
+        await ctx.send("🧠 All memories, summaries, and persona wiped. Heidi has been fully reset.")
+        log.warning("🧨 Heidi's memory and persona have been reset by %s.", ctx.author)
+    except Exception as e:
+        await ctx.send(f"❌ Error during reset: {e}")
+        log.error("❌ Error wiping memory: %s", e)
 
 # ------------------------
 # Error handler
