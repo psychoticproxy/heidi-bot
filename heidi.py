@@ -978,7 +978,7 @@ async def clearqueue(ctx):
 @bot.command()
 @has_permissions(administrator=True)
 async def setpersona(ctx, *, text: str):
-    """Manually replace Heidi's persona text (admin only)."""
+    """Manually replace Heidi's persona text."""
     try:
         await set_persona(text)
         await ctx.send("✅ Persona updated successfully.")
@@ -990,7 +990,7 @@ async def setpersona(ctx, *, text: str):
 @bot.command()
 @has_permissions(administrator=True)
 async def randommsg(ctx):
-    """Trigger Heidi's daily random message manually (admin only)."""
+    """Trigger Heidi's daily random message manually."""
     guild = ctx.guild
     if not guild:
         await ctx.send("❌ This command must be run inside a server.")
@@ -1029,7 +1029,37 @@ async def randommsg(ctx):
 
     await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
-    
+
+@bot.command()
+@has_permissions(administrator=True)
+async def runsummaries(ctx):
+    """Run one full summarization pass (per-user/channel + per-guild)."""
+    await ctx.send("Starting manual summarization pass...")
+    try:
+        # per user/channel
+        async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cur:
+            rows = await cur.fetchall()
+        for user_id, channel_id in rows:
+            await summarize_user_history(user_id, channel_id)
+            await asyncio.sleep(1)
+
+        # per guild
+        async with db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
+            chan_rows = await cur.fetchall()
+        guild_ids = set()
+        for (chid,) in chan_rows:
+            ch = bot.get_channel(int(chid))
+            if ch and getattr(ch, "guild", None):
+                guild_ids.add(str(ch.guild.id))
+        for gid in guild_ids:
+            await summarize_guild_history(gid)
+            await asyncio.sleep(1)
+
+        await ctx.send("Manual summarization complete.")
+    except Exception as e:
+        log.exception("Error in manual summarization: %s", e)
+        await ctx.send(f"Error while running summaries: {e}")
+
 # ------------------------
 # Error handler
 # ------------------------
