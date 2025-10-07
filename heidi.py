@@ -137,26 +137,41 @@ async def save_queued_message(user_id, channel_id, prompt):
 # ------------------------
 async def message_worker():
     while True:
-        channel, content, typing = await message_queue.get()
+        item = await message_queue.get()
+
+        # Handle both old (channel, content, typing)
+        # and new (channel, (content, reply_to), typing) formats
+        if isinstance(item[1], tuple):
+            channel, (content, reply_to), typing = item
+        else:
+            channel, content, typing = item
+            reply_to = None
+
         try:
             if typing:
                 async with channel.typing():
                     await asyncio.sleep(min(len(content) * 0.05, 5))
-            await safe_send(channel, content)
+
+            # Correct reply handling
+            if reply_to is not None:
+                await reply_to.reply(content)
+            else:
+                await safe_send(channel, content)
+
         except discord.errors.HTTPException as e:
-            log.warning("⚠️ Discord rate limit / HTTP error: %s", e)
+            log.warning("⚠️ Discord HTTP error: %s", e)
             await asyncio.sleep(5)
             try:
-                await safe_send(channel, content)
+                if reply_to is not None:
+                    await reply_to.reply(content)
+                else:
+                    await safe_send(channel, content)
             except Exception as e2:
-                log.error("❌ Failed to send message after retry: %s", e2)
+                log.error("❌ Retry failed: %s", e2)
         except Exception as e:
-            log.error("❌ Unexpected error in message_worker: %s", e)
+            log.error("❌ message_worker error: %s", e)
         finally:
-            try:
-                message_queue.task_done()
-            except Exception:
-                pass
+            message_queue.task_done()
 
 # ------------------------
 # Retry worker (single, authoritative)
@@ -291,8 +306,6 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
 # ------------------------
 DEFAULT_PERSONA = (
     "You are Heidi, a laconic, sometimes unhinged, sometimes offensive, sometimes schizophrenic Discord bot with a split personality who is the daughter of Proxy, your creator. "
-    "Stay concise. Never exceed 2000 characters in a single reply. "
-    "Never action/asterisk roleplay."
 )
 
 async def get_persona():
@@ -328,7 +341,7 @@ Here are some recent interactions:
 
 Please suggest a refined persona description that stays consistent with the character,
 but improves clarity, tone, and style based on these interactions.
-Always include: 'Never exceed 2000 characters in a single response. Never action/asterisk roleplay.'
+Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction.'
 Output only the new persona text, nothing else.
 """
         if http_client is None:
@@ -774,9 +787,9 @@ async def on_message(message):
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
 
         if reply:
-            content = f"{message.author.mention} {reply}" if random.choice([True, False]) else reply
+            content = f"{message.author.mention} {reply}"
             typing = random.random() < 0.8
-            await message_queue.put((message.channel, content, typing))
+            await message_queue.put((message.channel, (content, message), typing))
 
     await bot.process_commands(message)
 
@@ -846,34 +859,22 @@ async def randommsg(ctx):
         await ctx.send("❌ This command must be run inside a server.")
         return
 
-    # lookup channel
-    channel = guild.get_channel(CHANNEL_ID) or discord.utils.get(guild.text_channels, id=CHANNEL_ID)
-    if not channel:
-        await ctx.send("❌ Channel not found or bot lacks access to it.")
-        return
+    target_channel_id = 1385570983062278268
+    role_id = ROLE_ID  # reuse your configured role
 
-    # lookup role
-    role = guild.get_role(ROLE_ID) or next((r for r in guild.roles if r.id == ROLE_ID), None)
+    channel = guild.get_channel(target_channel_id)
+    role = guild.get_role(role_id)
+
+    if not channel:
+        await ctx.send("❌ Target channel not found or bot lacks access.")
+        return
     if not role:
         await ctx.send("❌ Role not found in this guild.")
         return
 
-    # try cached role.members first, otherwise fetch members from the API
-    members = [m for m in role.members if not m.bot] if role.members else []
+    members = [m for m in role.members if not m.bot]
     if not members:
-        try:
-            # requires Server Members Intent to be enabled in dev portal
-            members = [m async for m in guild.fetch_members(limit=None) if role in m.roles and not m.bot]
-        except Exception as e:
-            log.warning("⚠️ Failed to fetch members: %s", e)
-            # fallback to guild.members (may be empty if not cached)
-            members = [m for m in guild.members if role in m.roles and not m.bot]
-
-    if not members:
-        await ctx.send(
-            "❌ No eligible members found in the role. "
-            "Make sure the bot has the Server Members Intent enabled in the Discord Developer Portal and restart it."
-        )
+        await ctx.send("❌ No eligible members found in that role.")
         return
 
     target_user = random.choice(members)
@@ -885,10 +886,13 @@ async def randommsg(ctx):
 
     content = f"{target_user.mention} {reply}"
     typing = random.random() < 0.8
-    await message_queue.put((channel, content, typing))
-    await ctx.send(f"✅ Triggered random message to {target_user.display_name}.")
-    log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
+    # send message to the target channel, not as a reply
+    await message_queue.put((channel, content.strip(), typing))
+
+    await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
+    log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
+    
 # ------------------------
 # Error handler
 # ------------------------
