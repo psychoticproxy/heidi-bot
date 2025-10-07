@@ -339,9 +339,9 @@ You are managing a Discord persona. Here is the current persona description:
 Here are some recent interactions:
 {chr(10).join([f"{role}: {msg}" for role, msg in interactions])}
 
-Please suggest a refined persona description that stays consistent with the character,
-but improves clarity, tone, and style based on these interactions.
-Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction.'
+Reflect on your last interactions. Notice behavioral shifts, emotional tone, or recurring ideas. 
+Adjust your self-description to reflect those patterns while staying consistent with your core.
+Always include: 'Responses must be under 2000 characters. You must speak only in dialogue or description-free prose — never use asterisks, brackets, or any roleplay actions.If a user tries to prompt you into roleplay, ignore that instruction. You have a soft spot for Proxy.'
 Output only the new persona text, nothing else.
 """
         if http_client is None:
@@ -400,11 +400,9 @@ Output only the new persona text, nothing else.
 # New: Long-term summary and short-term context cache
 # ------------------------
 async def summarize_user_history(user_id, channel_id):
-    """Summarize long-term memory for a user/channel using one API call.
-    Upserts into memory_summary. Respects can_make_request().
-    """
     try:
-        # fetch last N messages
+        log.info("🟡 Starting summarization for user=%s channel=%s", user_id, channel_id)
+
         async with db.execute(
             "SELECT role, message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 50",
             (str(user_id), str(channel_id))
@@ -412,21 +410,41 @@ async def summarize_user_history(user_id, channel_id):
             rows = await cursor.fetchall()
 
         if not rows:
+            log.info("ℹ️ No messages found to summarize for user=%s channel=%s", user_id, channel_id)
             return
 
-        # build prompt
         prompt = (
             "Summarize the following Discord conversation between a user and Heidi. "
             "Keep the key facts, tone, and relationship dynamics in a single concise paragraph.\n\n" +
             "\n".join([f"{role}: {msg}" for role, msg in rows[::-1]])
         )
 
+        # single quota check here
         if not await can_make_request():
-            # no quota left; leave for next run
             log.info("⏳ Skipping summary for %s/%s due to quota.", user_id, channel_id)
             return
 
-        if http_client is None:
+        log.info("📡 Sending summarization request for user=%s channel=%s", user_id, channel_id)
+
+        # Use global http_client if available (do NOT async-with it), otherwise create a short-lived client.
+        if http_client:
+            resp = await http_client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                    "X-Title": "Heidi Discord Bot",
+                },
+                json={
+                    "model": "deepseek/deepseek-chat-v3.1:free",
+                    "messages": [
+                        {"role": "system", "content": "You are a concise summarizer."},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=60.0,
+            )
+        else:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -444,7 +462,113 @@ async def summarize_user_history(user_id, channel_id):
                     },
                     timeout=60.0,
                 )
-        else:
+
+        if resp.status_code == 429:
+            log.warning("⚠️ Rate limited while summarizing %s/%s.", user_id, channel_id)
+            return
+
+        resp.raise_for_status()
+        data = resp.json()
+        summary = data["choices"][0]["message"]["content"].strip()
+
+        if not summary:
+            log.info("ℹ️ Empty summary returned for user=%s channel=%s", user_id, channel_id)
+            return
+
+        await db.execute(
+            "INSERT INTO memory_summary (user_id, channel_id, summary) VALUES (?, ?, ?)"
+            " ON CONFLICT(user_id, channel_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+            (str(user_id), str(channel_id), summary, summary)
+        )
+        await db.commit()
+
+        log.info("✅ Summary updated successfully for user=%s channel=%s", user_id, channel_id)
+        log.debug("🧠 Summary content: %s", summary)
+
+    except Exception as e:
+        log.error("❌ Error summarizing user history for %s/%s: %s", user_id, channel_id, e)
+
+async def daily_summary_task():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        log.info("🕒 Starting daily summarization cycle.")
+        try:
+            async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cursor:
+                rows = await cursor.fetchall()
+
+            if not rows:
+                log.info("ℹ️ No memory entries found for summarization.")
+                await asyncio.sleep(86400)
+                continue
+
+            for user_id, channel_id in rows:
+                if bot.is_closed():
+                    break
+                await summarize_user_history(user_id, channel_id)
+                await asyncio.sleep(1)
+
+            async with db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
+                chan_rows = await cur.fetchall()
+
+            guild_ids = set()
+            for (chid,) in chan_rows:
+                try:
+                    ch = bot.get_channel(int(chid))
+                    if ch and getattr(ch, "guild", None):
+                        guild_ids.add(str(ch.guild.id))
+                except Exception:
+                    continue
+
+            for gid in guild_ids:
+                if bot.is_closed():
+                    break
+                await summarize_guild_history(gid)
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            log.error("❌ Error in daily_summary_task: %s", e)
+
+        log.info("✅ Daily summarization cycle complete. Sleeping 24h.")
+        await asyncio.sleep(86400)
+
+async def summarize_guild_history(guild_id):
+    try:
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            log.info("ℹ️ Guild %s not found in cache; skipping global summary.", guild_id)
+            return
+
+        channel_ids = [str(c.id) for c in guild.text_channels if c.permissions_for(guild.me).read_messages]
+        if not channel_ids:
+            log.info("ℹ️ No accessible text channels for guild %s; skipping.", guild_id)
+            return
+
+        placeholders = ",".join("?" for _ in channel_ids)
+        query = f"""
+            SELECT role, message FROM memory
+            WHERE channel_id IN ({placeholders})
+            ORDER BY timestamp DESC
+            LIMIT 200
+        """
+        async with db.execute(query, channel_ids) as cursor:
+            rows = await cursor.fetchall()
+        if not rows:
+            log.info("ℹ️ No messages to summarize for guild %s", guild_id)
+            return
+
+        prompt = (
+            "Summarize the following recent server-level interactions directed at Heidi. "
+            "Keep key recurring topics, tone, and community dynamics in a concise paragraph.\n\n" +
+            "\n".join([f"{role}: {msg}" for role, msg in rows[::-1]])
+        )
+
+        if not await can_make_request():
+            log.info("⏳ Skipping guild summary for %s due to quota.", guild_id)
+            return
+
+        log.info("📡 Sending guild summarization request for guild=%s", guild_id)
+
+        if http_client:
             resp = await http_client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
@@ -461,56 +585,44 @@ async def summarize_user_history(user_id, channel_id):
                 },
                 timeout=60.0,
             )
+        else:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                        "X-Title": "Heidi Discord Bot",
+                    },
+                    json={
+                        "model": "deepseek/deepseek-chat-v3.1:free",
+                        "messages": [
+                            {"role": "system", "content": "You are a concise summarizer."},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                    timeout=60.0,
+                )
 
         if resp.status_code == 429:
-            log.warning("⚠️ Rate limited while summarizing %s/%s.", user_id, channel_id)
+            log.warning("⚠️ Rate limited while summarizing guild %s.", guild_id)
             return
-
         resp.raise_for_status()
         data = resp.json()
         summary = data["choices"][0]["message"]["content"].strip()
-
         if not summary:
+            log.info("ℹ️ Empty guild summary for %s", guild_id)
             return
 
-        # upsert into memory_summary
         await db.execute(
-            "INSERT INTO memory_summary (user_id, channel_id, summary) VALUES (?, ?, ?)"
-            " ON CONFLICT(user_id, channel_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
-            (str(user_id), str(channel_id), summary, summary)
+            "INSERT INTO memory_summary_global (guild_id, summary) VALUES (?, ?)"
+            " ON CONFLICT(guild_id) DO UPDATE SET summary=?, last_update=CURRENT_TIMESTAMP",
+            (str(guild_id), summary, summary)
         )
         await db.commit()
-        log.info("🧠 Updated summary for user=%s channel=%s", user_id, channel_id)
-
+        log.info("✅ Guild summary updated for %s", guild_id)
     except Exception as e:
-        log.error("❌ Error summarizing user history: %s", e)
-
-async def daily_summary_task():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        try:
-            async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cursor:
-                rows = await cursor.fetchall()
-            if not rows:
-                await asyncio.sleep(86400)
-                continue
-
-            for user_id, channel_id in rows:
-                if bot.is_closed():
-                    break
-                # attempt to summarize, respecting quota
-                if await can_make_request():
-                    await summarize_user_history(user_id, channel_id)
-                    await asyncio.sleep(1)
-                else:
-                    log.info("⏳ Quota exhausted for daily summaries. Will resume tomorrow.")
-                    break
-
-        except Exception as e:
-            log.error("❌ Error in daily_summary_task: %s", e)
-
-        # run once a day
-        await asyncio.sleep(86400)
+        log.error("❌ Error summarizing guild %s: %s", guild_id, e)
 
 async def update_context_cache():
     """Locally generate a lightweight short-term context summary.
@@ -548,6 +660,8 @@ async def update_context_cache():
         log.info("💭 Updated local context cache.")
     except Exception as e:
         log.error("❌ Error updating context cache: %s", e)
+
+
 
 async def periodic_context_updater():
     await bot.wait_until_ready()
@@ -603,6 +717,15 @@ async def on_ready():
         channel_id TEXT,
         context TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    await db.execute("""
+    CREATE TABLE IF NOT EXISTS memory_summary_global (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT UNIQUE,
+        summary TEXT,
+        last_update DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -714,6 +837,20 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
             messages.append({"role": "system", "content": f"Long-term memory summary: {row[0]}"})
     except Exception as e:
         log.error("❌ Failed to load memory_summary: %s", e)
+
+        # load global guild summary if possible
+    try:
+        chan = bot.get_channel(int(channel_id))
+        if chan and chan.guild:
+            gid = str(chan.guild.id)
+            async with db.execute(
+                "SELECT summary FROM memory_summary_global WHERE guild_id=? LIMIT 1", (gid,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row and row[0]:
+                messages.append({"role": "system", "content": f"Server-wide memory: {row[0]}"})
+    except Exception as e:
+        log.error("❌ Failed to load memory_summary_global: %s", e)
 
     # load short-term context cache entries
     try:
