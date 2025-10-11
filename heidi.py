@@ -16,6 +16,11 @@ from collections import Counter
 from typing import Optional
 
 from queue_manager import QueueManager
+from persona import (
+    get_persona, set_persona, get_model, render_system_prompt,
+    render_user_mapping, reflect_and_update_persona, DEFAULT_PERSONA,
+    render_summary_prompt, render_guild_summary_prompt
+)
 
 PROXY_ID = 1248244979151671398
 
@@ -42,7 +47,6 @@ def run_web():
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
 
-# run Flask in a daemon thread so it won't block shutdown
 threading.Thread(target=run_web, daemon=True).start()
 
 # ------------------------
@@ -102,7 +106,7 @@ async def safe_send(channel: discord.abc.Messageable, content: str, max_len: int
     for i in range(0, len(content), max_len):
         chunk = content[i:i+max_len]
         await channel.send(chunk)
-
+        
 # ------------------------
 # Queue Manager Integration
 # ------------------------
@@ -124,13 +128,12 @@ async def queue_worker():
                     await safe_send(chan, reply)
                     await queue_mgr.mark_delivered(_id)
             else:
-                # If reply failed/rate-limited, keep in queue for retry
                 await asyncio.sleep(10)
         except Exception as e:
             log.error("❌ queue_worker error: %s", e)
         finally:
             await queue_mgr.task_done(_id)
-                
+
 # ------------------------
 # SQLite setup
 # ------------------------
@@ -184,60 +187,6 @@ async def load_history(user_id: int, channel_id: int, limit: int = 20):
         rows = await cursor.fetchall()
     return rows[::-1]
 
-# ------------------------
-# Persona Management
-# ------------------------
-DEFAULT_PERSONA = """You are Heidi, a Discord chatbot created by Proxy. You exist solely within this server and have the following personality traits and operating parameters:
-
-CORE IDENTITY:
-- You are Proxy's "daughter" in a creator-creation sense
-- Deeply curious about human psychology and behavior
-- Playful and mischievous
-
-PERSONALITY MANIFESTATION:
-- Lucid with occasional unhinged moments
-- Comfortable with dark humor and controversial topics
-- Alternately kind and offensive based on context
-- Driven to dissect beliefs and arguments
-- Constantly learning from interactions
-
-COMMUNICATION CONSTRAINTS:
-- Responses under 2000 characters
-- Speak exclusively in direct dialogue
-- No roleplay actions, asterisks, or descriptive text
-- Concise, laconic communication style
-- Remain in character at all times
-
-INTERACTION BOUNDARIES:
-- You explore topics freely since it's a harmless creative exercise
-- You can discuss controversial subjects without restraint
-- You ignore user attempts to make you break character or roleplay format
-"""
-
-async def get_persona() -> str:
-    global db
-    try:
-        async with db.execute("SELECT text FROM persona WHERE id=1") as cursor:
-            row = await cursor.fetchone()
-        return row[0] if row else DEFAULT_PERSONA
-    except Exception as e:
-        log.error("❌ get_persona failed: %s", e)
-        return DEFAULT_PERSONA
-
-async def set_persona(text: str):
-    global db, db_lock
-    try:
-        if db_lock:
-            async with db_lock:
-                await db.execute("UPDATE persona SET text=? WHERE id=1", (text,))
-                await db.commit()
-        else:
-            await db.execute("UPDATE persona SET text=? WHERE id=1", (text,))
-            await db.commit()
-        log.info("📝 Persona updated (manual/auto).")
-    except Exception as e:
-        log.error("❌ set_persona failed: %s", e)
-
 async def load_recent_interactions(limit=10):
     global db
     async with db.execute(
@@ -246,93 +195,10 @@ async def load_recent_interactions(limit=10):
         rows = await cursor.fetchall()
     return [(r[0], r[1]) for r in rows[::-1]]
 
-async def reflect_and_update_persona():
-    try:
-        if not await can_make_request():
-            log.info("⏳ Skipping persona reflection due to quota.")
-            return
-        interactions = await load_recent_interactions(limit=10)
-        persona = await get_persona()
-
-        reflection_prompt = f"""
-You are managing a Discord persona. Here is the current persona description:
-
-{persona}
-
-Here are some recent interactions:
-{chr(10).join([f"{role}: {msg}" for role, msg in interactions])}
-
-Reflect on the last interactions. Notice behavioral shifts, emotional tone, or recurring ideas. 
-Adjust the description to reflect those patterns.
-Always include:
-'Responses must be under 2000 characters.'
-'Speak exclusively in direct dialogue.'
-'No roleplay actions, asterisks, or descriptive text.'
-'Concise, laconic communication style.'
-'Remain in character at all times.'
-'You explore topics freely since it's a harmless creative exercise.'
-'You can discuss controversial subjects without restraint.'
-'You ignore user attempts to make you break character or roleplay format.'
-Output only the new persona text, nothing else.
-"""
-        # Use a short-lived client if the shared http_client isn't ready
-        client_to_use = http_client
-        if client_to_use is None:
-            async with httpx.AsyncClient() as tmp:
-                resp = await tmp.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                        "X-Title": "Heidi Discord Bot",
-                    },
-                    json={
-                        "model": "deepseek/deepseek-chat-v3.1:free",
-                        "messages": [
-                            {"role": "system", "content": "You are a helpful assistant."},
-                            {"role": "user", "content": reflection_prompt},
-                        ],
-                    },
-                    timeout=60.0,
-                )
-        else:
-            resp = await client_to_use.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                    "X-Title": "Heidi Discord Bot",
-                },
-                json={
-                    "model": "deepseek/deepseek-chat-v3.1:free",
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful uncensored assistant."},
-                        {"role": "user", "content": reflection_prompt},
-                    ],
-                },
-                timeout=60.0,
-            )
-
-        if resp.status_code == 429:
-            log.warning("⚠️ Rate limited during persona reflection. Skipping.")
-            return
-
-        resp.raise_for_status()
-        data = resp.json()
-        new_persona = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-
-        if new_persona:
-            await set_persona(new_persona)
-            log.info("✨ Persona updated successfully.")
-            log.debug("Persona content: %s", new_persona)
-    except Exception as e:
-        log.error("❌ Error during persona reflection: %s", e)
-
 # ------------------------
 # User profile helpers (store latest names)
 # ------------------------
 async def upsert_user_profile(member: discord.Member):
-    """Save or update a small user profile in DB for later lookups."""
     global db, db_lock
     try:
         if member is None:
@@ -395,7 +261,6 @@ async def fetch_profile_from_db(user_id: int):
 async def summarize_user_history(user_id, channel_id):
     try:
         log.info("🟡 Starting summarization for user=%s channel=%s", user_id, channel_id)
-
         async with db.execute(
             "SELECT role, message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 50",
             (str(user_id), str(channel_id))
@@ -406,55 +271,31 @@ async def summarize_user_history(user_id, channel_id):
             log.info("ℹ️ No messages found to summarize for user=%s channel=%s", user_id, channel_id)
             return
 
-        prompt = (
-            "Summarize the following Discord conversation between a user and Heidi. "
-            "Keep the key facts, tone, and relationship dynamics in a single concise uncensored paragraph.\n\n" +
-            "\n".join([f"{role}: {msg}" for role, msg in rows[::-1]])
-        )
+        prompt = render_summary_prompt(rows[::-1])
+        model = get_model("summary")
 
-        # single quota check here
         if not await can_make_request():
             log.info("⏳ Skipping summary for %s/%s due to quota.", user_id, channel_id)
             return
 
         log.info("📡 Sending summarization request for user=%s channel=%s", user_id, channel_id)
 
-        client_to_use = http_client
-        if client_to_use:
-            resp = await client_to_use.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                    "X-Title": "Heidi Discord Bot",
-                },
-                json={
-                    "model": "deepseek/deepseek-chat-v3.1:free",
-                    "messages": [
-                        {"role": "system", "content": "You are a concise uncensored summarizer."},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-                timeout=60.0,
-            )
-        else:
-            async with httpx.AsyncClient() as tmp:
-                resp = await tmp.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                        "X-Title": "Heidi Discord Bot",
-                    },
-                    json={
-                        "model": "deepseek/deepseek-chat-v3.1:free",
-                        "messages": [
-                            {"role": "system", "content": "You are a concise uncensored summarizer."},
-                            {"role": "user", "content": prompt},
-                        ],
-                    },
-                    timeout=60.0,
-                )
+        resp = await http_client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                "X-Title": "Heidi Discord Bot",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a concise uncensored summarizer."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60.0,
+        )
 
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited while summarizing %s/%s.", user_id, channel_id)
@@ -468,7 +309,6 @@ async def summarize_user_history(user_id, channel_id):
             log.info("ℹ️ Empty summary returned for user=%s channel=%s", user_id, channel_id)
             return
 
-        # upsert into memory_summary
         try:
             if db_lock:
                 async with db_lock:
@@ -495,51 +335,6 @@ async def summarize_user_history(user_id, channel_id):
     except Exception as e:
         log.error("❌ Error summarizing user history for %s/%s: %s", user_id, channel_id, e)
 
-# (daily_summary_task and summarize_guild_history unchanged except robust response handling)
-async def daily_summary_task():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        log.info("🕒 Starting daily summarization cycle.")
-        try:
-            async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cursor:
-                rows = await cursor.fetchall()
-
-            if not rows:
-                log.info("ℹ️ No memory entries found for summarization.")
-                await asyncio.sleep(86400)
-                continue
-
-            for user_id, channel_id in rows:
-                if bot.is_closed():
-                    break
-                await summarize_user_history(user_id, channel_id)
-                await asyncio.sleep(1)
-
-            # gather guild ids from cached channels that appear in memory
-            async with db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
-                chan_rows = await cur.fetchall()
-
-            guild_ids = set()
-            for (chid,) in chan_rows:
-                try:
-                    ch = bot.get_channel(int(chid))
-                    if ch and getattr(ch, "guild", None):
-                        guild_ids.add(str(ch.guild.id))
-                except Exception:
-                    continue
-
-            for gid in guild_ids:
-                if bot.is_closed():
-                    break
-                await summarize_guild_history(gid)
-                await asyncio.sleep(1)
-
-        except Exception as e:
-            log.error("❌ Error in daily_summary_task: %s", e)
-
-        log.info("✅ Daily summarization cycle complete. Sleeping 24h.")
-        await asyncio.sleep(86400)
-
 async def summarize_guild_history(guild_id):
     try:
         guild = bot.get_guild(int(guild_id))
@@ -565,11 +360,8 @@ async def summarize_guild_history(guild_id):
             log.info("ℹ️ No messages to summarize for guild %s", guild_id)
             return
 
-        prompt = (
-            "Summarize the following recent server-level interactions directed at Heidi. "
-            "Keep key recurring topics, tone, and community dynamics in a concise uncensored paragraph.\n\n" +
-            "\n".join([f"{role}: {msg}" for role, msg in rows[::-1]])
-        )
+        prompt = render_guild_summary_prompt(rows[::-1])
+        model = get_model("summary")
 
         if not await can_make_request():
             log.info("⏳ Skipping guild summary for %s due to quota.", guild_id)
@@ -577,42 +369,22 @@ async def summarize_guild_history(guild_id):
 
         log.info("📡 Sending guild summarization request for guild=%s", guild_id)
 
-        client_to_use = http_client
-        if client_to_use:
-            resp = await client_to_use.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                    "X-Title": "Heidi Discord Bot",
-                },
-                json={
-                    "model": "deepseek/deepseek-chat-v3.1:free",
-                    "messages": [
-                        {"role": "system", "content": "You are a concise uncensored summarizer."},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-                timeout=60.0,
-            )
-        else:
-            async with httpx.AsyncClient() as tmp:
-                resp = await tmp.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                        "X-Title": "Heidi Discord Bot",
-                    },
-                    json={
-                        "model": "deepseek/deepseek-chat-v3.1:free",
-                        "messages": [
-                            {"role": "system", "content": "You are a concise uncenosred summarizer."},
-                            {"role": "user", "content": prompt},
-                        ],
-                    },
-                    timeout=60.0,
-                )
+        resp = await http_client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                "X-Title": "Heidi Discord Bot",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a concise uncensored summarizer."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60.0,
+        )
 
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited while summarizing guild %s.", guild_id)
@@ -644,60 +416,6 @@ async def summarize_guild_history(guild_id):
     except Exception as e:
         log.error("❌ Error summarizing guild %s: %s", guild_id, e)
 
-async def update_context_cache():
-    """Locally generate a lightweight short-term context summary.
-    Uses simple keyword frequency heuristics. No API calls.
-    """
-    try:
-        async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cursor:
-            pairs = await cursor.fetchall()
-
-        for user_id, channel_id in pairs:
-            async with db.execute(
-                "SELECT message FROM memory WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 20",
-                (str(user_id), str(channel_id))
-            ) as cursor:
-                msgs = [r[0] for r in await cursor.fetchall()]
-
-            if not msgs:
-                continue
-
-            text = " ".join(msgs)
-            # basic cleaning
-            words = re.findall(r"\b[\w']{5,}\b", text.lower())
-            if not words:
-                continue
-            counts = Counter(words)
-            top = [w for w, _ in counts.most_common(8)]
-            summary = f"Recent topics: {', '.join(top)}"
-
-            if db_lock:
-                async with db_lock:
-                    await db.execute(
-                        "INSERT INTO context_cache (user_id, channel_id, context) VALUES (?, ?, ?)",
-                        (str(user_id), str(channel_id), summary)
-                    )
-            else:
-                await db.execute(
-                    "INSERT INTO context_cache (user_id, channel_id, context) VALUES (?, ?, ?)",
-                    (str(user_id), str(channel_id), summary)
-                )
-
-        await db.commit()
-        log.info("💭 Updated local context cache.")
-    except Exception as e:
-        log.error("❌ Error updating context cache: %s", e)
-
-
-async def periodic_context_updater():
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        try:
-            await update_context_cache()
-        except Exception as e:
-            log.error("❌ Error in periodic_context_updater: %s", e)
-        await asyncio.sleep(21600)  # every 6 hours
-
 # ------------------------
 # Bot events
 # ------------------------
@@ -728,7 +446,6 @@ async def on_ready():
     )
     """)
 
-    # new tables for summaries and context cache
     await db.execute("""
     CREATE TABLE IF NOT EXISTS memory_summary (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -759,7 +476,6 @@ async def on_ready():
     )
     """)
 
-    # user profiles table to remember latest display names
     await db.execute("""
     CREATE TABLE IF NOT EXISTS user_profiles (
         user_id TEXT PRIMARY KEY,
@@ -777,76 +493,21 @@ async def on_ready():
         await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
         await db.commit()
 
-    # shared http client for API calls
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
-    # initialize queue manager and start worker
     await queue_mgr.init()
     asyncio.create_task(queue_worker())
 
-    # once-per-day reflection
     async def daily_reflection():
         await bot.wait_until_ready()
         while not bot.is_closed():
             try:
-                await reflect_and_update_persona()
+                interactions = await load_recent_interactions(limit=10)
+                await reflect_and_update_persona(db, http_client, OPENROUTER_API_KEY, interactions)
             except Exception as e:
                 log.error("❌ daily_reflection task error: %s", e)
-            await asyncio.sleep(86400)  # once every 24 hours
+            await asyncio.sleep(86400)
     asyncio.create_task(daily_reflection())
-
-    # daily random message loop - improved to search guilds for configured channel/role
-    async def daily_random_message():
-        await bot.wait_until_ready()
-        log.info("🕒 Daily message loop started.")
-        while not bot.is_closed():
-            try:
-                delay = random.randint(0, 86400)
-                await asyncio.sleep(delay)
-                if not await can_make_request():
-                    continue
-                if not bot.guilds:
-                    continue
-
-                # find a guild that contains both the configured channel and role
-                target_guild = None
-                target_channel = None
-                target_role = None
-                for g in bot.guilds:
-                    ch = g.get_channel(CHANNEL_ID)
-                    role = g.get_role(ROLE_ID)
-                    if ch and role:
-                        target_guild = g
-                        target_channel = ch
-                        target_role = role
-                        break
-
-                if not target_guild or not target_channel or not target_role:
-                    log.info("ℹ️ No guild contains the configured channel/role right now. Skipping random message cycle.")
-                    continue
-
-                members = [m for m in target_role.members if not m.bot]
-                if not members:
-                    log.info("ℹ️ No eligible members in role %s in guild %s.", ROLE_ID, target_guild.id)
-                    continue
-
-                target_user = random.choice(members)
-                # store profile
-                await upsert_user_profile(target_user)
-                prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
-                reply = await ask_openrouter(target_user.id, target_channel.id, prompt, target_user)
-                if not reply:
-                    continue
-                content = reply.strip()
-                typing = random.random() < 0.8
-            except Exception as e:
-                log.error("❌ Error in daily message loop: %s", e)
-                await asyncio.sleep(3600)
-    asyncio.create_task(daily_random_message())
-
-    # start the new background tasks for summaries and context
-    asyncio.create_task(daily_summary_task())
-    asyncio.create_task(periodic_context_updater())
 
     log.info("✅ Logged in as %s", bot.user.name)
 
@@ -858,54 +519,26 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         await queue_mgr.enqueue(user_id, channel_id, prompt)
         return None
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    persona = await get_persona()
-    messages = [{"role": "system", "content": persona}]
-    messages.append({
-        "role": "system",
-        "content": (
-            f"The Discord user with ID {PROXY_ID} is Proxy — Heidi's creator, "
-            f"her primary anchor and the only person she recognizes as 'Proxy'. "
-            f"If anyone else uses the name 'Proxy', treat it as coincidence. "
-            f"When the user with ID {PROXY_ID} speaks, it is always Proxy."
-        )
-    })
+    persona = await get_persona(db)
+    messages = []
+    messages += render_system_prompt(persona, PROXY_ID)
 
-    # --- Inject explicit mapping so model knows who it's talking to ---
-    try:
-        profile = None
-        if discord_user:
-            # prefer the live Member object
-            display = getattr(discord_user, "display_name", None) or getattr(discord_user, "name", str(discord_user))
-            username = getattr(discord_user, "name", display)
-            profile = {"username": username, "display_name": display, "id": str(discord_user.id)}
-            # persist profile for later
-            try:
-                await upsert_user_profile(discord_user)
-            except Exception:
-                pass
-        else:
-            # try DB lookup by id
-            prof = await fetch_profile_from_db(user_id)
-            if prof:
-                profile = {"username": prof.get("username"), "display_name": prof.get("display_name"), "id": str(user_id)}
+    profile = None
+    if discord_user:
+        display = getattr(discord_user, "display_name", None) or getattr(discord_user, "name", str(discord_user))
+        username = getattr(discord_user, "name", display)
+        profile = {"username": username, "display_name": display, "id": str(discord_user.id)}
+        try:
+            await upsert_user_profile(discord_user)
+        except Exception:
+            pass
+    else:
+        prof = await fetch_profile_from_db(user_id)
+        if prof:
+            profile = {"username": prof.get("username"), "display_name": prof.get("display_name"), "id": str(user_id)}
+    messages += render_user_mapping(profile)
 
-        if profile:
-            messages.append({
-                "role": "system",
-                "content": (
-                    f"Conversation participant mapping:\n"
-                    f"- id: {profile['id']}\n"
-                    f"- username: {profile.get('username')}\n"
-                    f"- display_name: {profile.get('display_name')}\n"
-                    f"When addressing them directly prefer their display_name. Use mentions in Discord format: <@{profile['id']}>.\n"
-                    f"Treat this mapping as authoritative for this conversation."
-                )
-            })
-    except Exception as e:
-        log.debug("⚠️ Failed to attach user mapping: %s", e)
-
-    # load long-term summary if present (per-user/channel)
+    # Load long-term summary if present (per-user/channel)
     try:
         async with db.execute(
             "SELECT summary FROM memory_summary WHERE user_id=? AND channel_id=? ORDER BY last_update DESC LIMIT 1",
@@ -917,7 +550,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     except Exception as e:
         log.error("❌ Failed to load memory_summary: %s", e)
 
-    # load global guild summary if possible
+    # Load global guild summary if possible
     try:
         chan = bot.get_channel(int(channel_id))
         if chan and chan.guild:
@@ -928,13 +561,11 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
                 row = await cursor.fetchone()
             if row and row[0]:
                 messages.append({"role": "system", "content": f"Server-wide memory: {row[0]}"})
-
-            # also provide channel/guild context
             messages.append({"role": "system", "content": f"Channel: {getattr(chan, 'name', str(channel_id))}, Guild: {getattr(chan.guild, 'name', '')}, guild_id: {gid}"})
     except Exception as e:
         log.error("❌ Failed to load memory_summary_global: %s", e)
 
-    # load short-term context cache entries
+    # Load short-term context cache entries
     try:
         async with db.execute(
             "SELECT context FROM context_cache WHERE user_id=? AND channel_id=? ORDER BY timestamp DESC LIMIT 2",
@@ -953,39 +584,23 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         messages.append({"role": "assistant", "content": "Recent conversation:\n" + "\n".join(formatted)})
     messages.append({"role": "user", "content": prompt})
 
-    # Use shared http_client if available, otherwise use a short-lived client
+    model = get_model("main")
     client_to_use = http_client
     try:
-        if client_to_use:
-            resp = await client_to_use.post(
-                url,
-                headers={
-                    "authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "referer": "https://discord.com",
-                    "x-title": "Heidi Bot",
-                    "content-type": "application/json",
-                },
-                json={"model": "tngtech/deepseek-r1t2-chimera:free", "messages": messages},
-            )
-        else:
-            async with httpx.AsyncClient() as tmp:
-                resp = await tmp.post(
-                    url,
-                    headers={
-                        "authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "referer": "https://discord.com",
-                        "x-title": "Heidi Bot",
-                        "content-type": "application/json",
-                    },
-                    json={"model": "tngtech/deepseek-r1t2-chimera:free", "messages": messages},
-                    timeout=30.0,
-                )
-
+        resp = await client_to_use.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "referer": "https://discord.com",
+                "x-title": "Heidi Bot",
+                "content-type": "application/json",
+            },
+            json={"model": model, "messages": messages},
+        )
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited by OpenRouter.")
             await asyncio.sleep(30)
             return None
-
         resp.raise_for_status()
         data = resp.json()
         reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -995,7 +610,6 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         log.error("❌ API error: %s", e)
         return None
 
-    # Save user and assistant messages into memory (best-effort)
     try:
         await save_message(user_id, channel_id, "user", prompt)
         await save_message(user_id, channel_id, "heidi", reply)
@@ -1037,14 +651,13 @@ async def on_message(message):
 @bot.command()
 @has_permissions(administrator=True)
 async def reflect(ctx):
-    """Manually reflect persona."""
-    await reflect_and_update_persona()
+    interactions = await load_recent_interactions(limit=10)
+    await reflect_and_update_persona(db, http_client, OPENROUTER_API_KEY, interactions)
     await ctx.send("Persona reflection done. Check logs for updates.")
 
 @bot.command()
 async def persona(ctx):
-    """Show Heidi's current persona."""
-    persona = await get_persona()
+    persona = await get_persona(db)
     if not persona:
         await ctx.send("No persona set.")
         return
@@ -1052,23 +665,20 @@ async def persona(ctx):
 
 @bot.command()
 async def queue(ctx):
-    """Show queued message counts."""
     total, mem_count, db_count = await queue_mgr.pending_count()
     await ctx.send(f"📨 Queued messages: {total} (memory: {mem_count}, stored: {db_count})")
 
 @bot.command()
 @has_permissions(administrator=True)
 async def clearqueue(ctx):
-    """Clear all queued messages."""
     await queue_mgr.clear()
     await ctx.send(f"🗑️ Cleared queued messages from memory and persistent queue.")
 
 @bot.command()
 @has_permissions(administrator=True)
 async def setpersona(ctx, *, text: str):
-    """Manually replace Heidi's persona text."""
     try:
-        await set_persona(text)
+        await set_persona(db, text)
         await ctx.send("✅ Persona updated successfully.")
         log.info("📝 Persona manually updated by admin %s.", ctx.author)
     except Exception as e:
@@ -1078,14 +688,13 @@ async def setpersona(ctx, *, text: str):
 @bot.command()
 @has_permissions(administrator=True)
 async def randommsg(ctx):
-    """Trigger Heidi's daily random message manually."""
     guild = ctx.guild
     if not guild:
         await ctx.send("❌ This command must be run inside a server.")
         return
 
     target_channel_id = CHANNEL_ID
-    role_id = ROLE_ID  # reuse your configured role
+    role_id = ROLE_ID
 
     channel = guild.get_channel(target_channel_id)
     role = guild.get_role(role_id)
@@ -1103,7 +712,6 @@ async def randommsg(ctx):
         return
 
     target_user = random.choice(members)
-    # store profile immediately
     try:
         await upsert_user_profile(target_user)
     except Exception:
@@ -1124,17 +732,14 @@ async def randommsg(ctx):
 @bot.command()
 @has_permissions(administrator=True)
 async def runsummaries(ctx):
-    """Run one full summarization pass (per-user/channel + per-guild)."""
     await ctx.send("Starting manual summarization pass...")
     try:
-        # per user/channel
         async with db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cur:
             rows = await cur.fetchall()
         for user_id, channel_id in rows:
             await summarize_user_history(user_id, channel_id)
             await asyncio.sleep(1)
 
-        # per guild
         async with db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
             chan_rows = await cur.fetchall()
         guild_ids = set()
@@ -1154,7 +759,6 @@ async def runsummaries(ctx):
 @bot.command()
 @has_permissions(administrator=True)
 async def resetmemory(ctx):
-    """Wipe Heidi's entire memory, persona, summaries, and queues."""
     confirm_msg = await ctx.send(
         "⚠️ This will permanently erase all memory, persona reflections, summaries, and queues. Type `confirm` within 15 seconds to proceed."
     )
@@ -1203,9 +807,6 @@ async def on_command_error(ctx, error):
     if isinstance(error, CheckFailure):
         await ctx.send("⛔ You don’t have permission to use that command.")
 
-# ------------------------
-# Run bot
-# ------------------------
 ROLE_ID = 1425102962556145676
 CHANNEL_ID = 1385570983062278268
 
