@@ -7,7 +7,7 @@ from typing import Optional, List, Tuple, Dict
 log = logging.getLogger("heidi.memory")
 
 ROW_LIMIT = 500_000
-OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://api.openrouter.ai/v1/chat/completions")
+OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/v1/chat/completions")
 
 class MemoryManager:
     def __init__(self, db_file="heidi_memory.db"):
