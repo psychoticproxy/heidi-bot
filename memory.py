@@ -197,7 +197,7 @@ class MemoryManager:
             row = await cursor.fetchone()
         return row[0] if row else None
 
-    # --- Reset all memory ---
+       # --- Reset all memory ---
     async def reset_memory(self):
         async with self.lock:
             await self.db.execute("DELETE FROM memory")
@@ -208,7 +208,7 @@ class MemoryManager:
             await self.db.commit()
 
     # --- Summarization utilities for bot commands ---
-   async def summarize_user_history(self, user_id: int, channel_id: int, http_client, api_key, persona_model=None):
+    async def summarize_user_history(self, user_id: int, channel_id: int, http_client, api_key, persona_model=None):
         history = await self.load_history(user_id, channel_id, limit=50)
         if not history:
             return
