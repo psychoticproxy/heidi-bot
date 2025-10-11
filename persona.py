@@ -30,9 +30,9 @@ INTERACTION BOUNDARIES:
 """
 
 # Model management
-MODEL_MAIN = "deepseek/deepseek-chat-v3.1:free"
-MODEL_SUMMARY = "deepseek/deepseek-chat-v3.1:free"
-MODEL_REFLECTION = "deepseek/deepseek-chat-v3.1:free"
+MODEL_MAIN = "tngtech/deepseek-r1t2-chimera:free"
+MODEL_SUMMARY = "tngtech/deepseek-r1t2-chimera:free"
+MODEL_REFLECTION = "tngtech/deepseek-r1t2-chimera:free"
 
 log = logging.getLogger("heidi.persona")
 OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/api/v1/chat/completions")
