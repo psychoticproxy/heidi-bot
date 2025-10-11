@@ -1,11 +1,13 @@
 import aiosqlite
 import asyncio
 import logging
+import os
 from typing import Optional, List, Tuple, Dict
 
 log = logging.getLogger("heidi.memory")
 
 ROW_LIMIT = 500_000
+OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://api.openrouter.ai/v1/chat/completions")
 
 class MemoryManager:
     def __init__(self, db_file="heidi_memory.db"):
@@ -61,6 +63,19 @@ class MemoryManager:
             nick TEXT,
             last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
         )""")
+        # --- Ensure persona table exists and seed if empty ---
+        await self.db.execute("""
+        CREATE TABLE IF NOT EXISTS persona (
+            id INTEGER PRIMARY KEY,
+            text TEXT
+        )
+        """)
+        # Seed default persona if missing
+        async with self.db.execute("SELECT COUNT(*) FROM persona") as cur:
+            row = await cur.fetchone()
+        if not row or row[0] == 0:
+            from persona import DEFAULT_PERSONA
+            await self.db.execute("INSERT INTO persona (id, text) VALUES (1, ?)", (DEFAULT_PERSONA,))
         await self.db.commit()
 
     # --- Memory Operations ---
@@ -193,8 +208,7 @@ class MemoryManager:
             await self.db.commit()
 
     # --- Summarization utilities for bot commands ---
-    async def summarize_user_history(self, user_id: int, channel_id: int, http_client, api_key, persona_model=None):
-        # Fetch interactions
+   async def summarize_user_history(self, user_id: int, channel_id: int, http_client, api_key, persona_model=None):
         history = await self.load_history(user_id, channel_id, limit=50)
         if not history:
             return
@@ -203,7 +217,7 @@ class MemoryManager:
         model = persona_model or get_model("summary")
         try:
             resp = await http_client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                OPENROUTER_API_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
@@ -221,6 +235,13 @@ class MemoryManager:
             if resp.status_code == 429:
                 log.warning("⚠️ Rate limited during summary generation. Skipping.")
                 return
+            if resp.status_code != 200:
+                try:
+                    text = await resp.text()
+                except Exception:
+                    text = "<couldn't read response body>"
+                log.error("❌ OpenRouter returned %s: %s", resp.status_code, text)
+                resp.raise_for_status()
             resp.raise_for_status()
             data = resp.json()
             summary = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -231,8 +252,6 @@ class MemoryManager:
             log.error("❌ Error during summary generation: %s", e)
 
     async def summarize_guild_history(self, guild_id: int, bot, http_client, api_key, persona_model=None):
-        # Gather all recent messages from all channels in guild
-        # This is a simplified version: a real implementation might want to filter more carefully
         messages = []
         async with self.db.execute(
             "SELECT role, message FROM memory WHERE user_id IS NOT NULL AND channel_id IS NOT NULL"
@@ -243,11 +262,11 @@ class MemoryManager:
         if not messages:
             return
         from persona import render_guild_summary_prompt, get_model
-        prompt = render_guild_summary_prompt(messages[-50:])  # last 50 interactions
+        prompt = render_guild_summary_prompt(messages[-50:])
         model = persona_model or get_model("summary")
         try:
             resp = await http_client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                OPENROUTER_API_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
@@ -265,6 +284,13 @@ class MemoryManager:
             if resp.status_code == 429:
                 log.warning("⚠️ Rate limited during guild summary. Skipping.")
                 return
+            if resp.status_code != 200:
+                try:
+                    text = await resp.text()
+                except Exception:
+                    text = "<couldn't read response body>"
+                log.error("❌ OpenRouter returned %s: %s", resp.status_code, text)
+                resp.raise_for_status()
             resp.raise_for_status()
             data = resp.json()
             summary = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
