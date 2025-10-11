@@ -15,6 +15,8 @@ import re
 from collections import Counter
 from typing import Optional
 
+from queue_manager import QueueManager
+
 PROXY_ID = 1248244979151671398
 
 # ------------------------
@@ -74,16 +76,22 @@ daily_reset_timestamp = 0
 async def can_make_request() -> bool:
     global daily_usage, daily_reset_timestamp
     now = time.time()
-    # reset daily_usage when current time passes the reset timestamp
     if now > daily_reset_timestamp:
         daily_usage = 0
-        daily_reset_timestamp = now + 86400  # next UTC day
+        daily_reset_timestamp = now + 86400
         log.info("🔄 Daily quota reset.")
     if daily_usage < DAILY_LIMIT:
         daily_usage += 1
         return True
     return False
 
+async def safe_send(channel: discord.abc.Messageable, content: str, max_len: int = 2000):
+    if not content:
+        return
+    for i in range(0, len(content), max_len):
+        chunk = content[i:i+max_len]
+        await channel.send(chunk)
+        
 # -----------------------------------------
 # Helper to safely send long messages
 # -----------------------------------------
@@ -96,223 +104,32 @@ async def safe_send(channel: discord.abc.Messageable, content: str, max_len: int
         await channel.send(chunk)
 
 # ------------------------
-# Async message queue
+# Queue Manager Integration
 # ------------------------
-message_queue: asyncio.Queue = asyncio.Queue()
-retry_queue: asyncio.Queue = asyncio.Queue()
+queue_mgr = QueueManager("queued_messages.db")
 
-# Persistent queue storage
-QUEUE_DB = "queued_messages.db"
-queue_db: Optional[aiosqlite.Connection] = None
-
-# track DB row ids already loaded into the in-memory retry queue
-loaded_queue_ids = set()
-
-# locks to avoid concurrent DB writes
-db_lock: Optional[asyncio.Lock] = None
-queue_db_lock: Optional[asyncio.Lock] = None
-
-async def load_queued_messages():
-    """Load persisted queued messages into the in-memory retry queue without deleting DB rows.
-    Keeps DB rows until a message is successfully delivered.
-    """
-    global queue_db, loaded_queue_ids, queue_db_lock
-    if queue_db is None:
-        log.warning("⚠️ queue_db is not initialized; skipping load_queued_messages.")
-        return
-    try:
-        # protect concurrent access to the queue DB
-        if queue_db_lock:
-            async with queue_db_lock:
-                async with queue_db.execute("SELECT id, user_id, channel_id, prompt FROM queue ORDER BY id ASC") as cursor:
-                    rows = await cursor.fetchall()
-        else:
-            async with queue_db.execute("SELECT id, user_id, channel_id, prompt FROM queue ORDER BY id ASC") as cursor:
-                rows = await cursor.fetchall()
-
-        if not rows:
-            return
-
-        count = 0
-        for _id, user_id, channel_id, prompt in rows:
-            if _id in loaded_queue_ids:
-                continue
-            # push the DB id along with the row so the worker can delete it on success
-            await retry_queue.put((_id, user_id, channel_id, prompt, None))
-            loaded_queue_ids.add(_id)
-            count += 1
-
-        log.info("📥 Loaded %s persisted queued messages into retry queue.", count)
-    except Exception as e:
-        log.error("❌ Error loading queued messages: %s", e)
-
-async def save_queued_message(user_id, channel_id, prompt):
-    global queue_db, queue_db_lock
-    if queue_db is None:
-        log.error("❌ queue_db not available; cannot persist queued message. user=%s channel=%s", user_id, channel_id)
-        return
-    try:
-        if queue_db_lock:
-            async with queue_db_lock:
-                await queue_db.execute(
-                    "INSERT INTO queue (user_id, channel_id, prompt) VALUES (?, ?, ?)",
-                    (str(user_id), str(channel_id), prompt)
-                )
-                await queue_db.commit()
-        else:
-            await queue_db.execute(
-                "INSERT INTO queue (user_id, channel_id, prompt) VALUES (?, ?, ?)",
-                (str(user_id), str(channel_id), prompt)
-            )
-            await queue_db.commit()
-        log.info("💾 Persisted queued message for user=%s channel=%s", user_id, channel_id)
-    except Exception as e:
-        log.error("❌ Failed to persist queued message: %s", e)
-
-# ------------------------
-# Message worker
-# ------------------------
-async def message_worker():
+async def queue_worker():
     while True:
-        item = await message_queue.get()
-
-        # Handle both old (channel, content, typing)
-        # and new (channel, (content, reply_to), typing) formats
+        msg = await queue_mgr.get_next()
+        if not msg:
+            await asyncio.sleep(2)
+            continue
+        _id, user_id, channel_id, prompt = msg
         try:
-            if isinstance(item[1], tuple):
-                channel, (content, reply_to), typing = item
+            reply = await ask_openrouter(user_id, channel_id, prompt, None)
+            if reply:
+                chan = bot.get_channel(int(channel_id))
+                if chan:
+                    typing = random.random() < 0.8
+                    await safe_send(chan, reply)
+                    await queue_mgr.mark_delivered(_id)
             else:
-                channel, content, typing = item
-                reply_to = None
-
-            try:
-                # If replying to a message, show typing in that message's channel
-                typing_channel = reply_to.channel if reply_to is not None else channel
-                if typing and hasattr(typing_channel, "typing"):
-                    async with typing_channel.typing():
-                        await asyncio.sleep(min(len(content) * 0.05, 5))
-
-                # Correct reply handling: when replying to a message, don't mention the author
-                if reply_to is not None:
-                    await reply_to.reply(content, mention_author=False)
-                else:
-                    await safe_send(channel, content)
-
-            except discord.errors.HTTPException as e:
-                log.warning("⚠️ Discord HTTP error while sending message: %s", e)
-                await asyncio.sleep(5)
-                try:
-                    if reply_to is not None:
-                        await reply_to.reply(content, mention_author=False)
-                    else:
-                        await safe_send(channel, content)
-                except Exception as e2:
-                    log.error("❌ Retry failed: %s", e2)
-            except Exception as e:
-                log.error("❌ message_worker error: %s", e)
+                # If reply failed/rate-limited, keep in queue for retry
+                await asyncio.sleep(10)
         except Exception as e:
-            log.error("❌ message_worker unexpected item format or error: %s (item=%s)", e, item)
+            log.error("❌ queue_worker error: %s", e)
         finally:
-            try:
-                message_queue.task_done()
-            except Exception:
-                pass
-
-# ------------------------
-# Retry worker (single, authoritative)
-# ------------------------
-async def retry_worker():
-    while True:
-        item = await retry_queue.get()
-        _id = None
-        user_id = channel_id = prompt = discord_user = None
-        try:
-            # normalize item formats
-            if isinstance(item, tuple) and len(item) >= 4 and isinstance(item[0], int):
-                _id, user_id, channel_id, prompt = item[0], item[1], item[2], item[3]
-                discord_user = None if len(item) < 5 else item[4]
-            else:
-                try:
-                    user_id, channel_id, prompt, discord_user = item
-                except Exception:
-                    log.error("❌ Unexpected queued item format: %s", item)
-                    retry_queue.task_done()
-                    continue
-
-            log.info("🔁 Processing queued message id=%s user=%s channel=%s", _id, user_id, channel_id)
-            attempt = 0
-            max_attempts_before_persist = 5
-            delay = 5
-
-            while True:
-                # Call ask_openrouter directly. It will handle quota and persistence if needed.
-                try:
-                    reply = await ask_openrouter(user_id, channel_id, prompt, discord_user)
-                except Exception as e:
-                    log.warning("⚠️ ask_openrouter error while processing queued message: %s", e)
-                    reply = None
-
-                if reply:
-                    # try to find the channel and enqueue for sending
-                    try:
-                        chan = bot.get_channel(int(channel_id))
-                    except Exception:
-                        chan = None
-
-                    if chan:
-                        typing = random.random() < 0.8
-                        await message_queue.put((chan, reply, typing))
-                        log.info("✅ Enqueued queued reply for user=%s id=%s", user_id, _id)
-
-                        # delete DB row only after successful enqueue
-                        if _id is not None and queue_db is not None:
-                            try:
-                                if queue_db_lock:
-                                    async with queue_db_lock:
-                                        await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
-                                        await queue_db.commit()
-                                else:
-                                    await queue_db.execute("DELETE FROM queue WHERE id=?", (_id,))
-                                    await queue_db.commit()
-                                loaded_queue_ids.discard(_id)
-                                log.info("🗑️ Deleted queued row id=%s after successful delivery.", _id)
-                            except Exception as e:
-                                log.error("❌ Failed to delete queued DB row id=%s: %s", _id, e)
-                        break
-                    else:
-                        log.warning("⚠️ Channel %s not found for queued message id=%s. Leaving in DB and will retry later.", channel_id, _id)
-                        # don't delete the DB row; back off and retry
-                else:
-                    log.info("ℹ️ ask_openrouter returned no reply; will back off and retry (attempt %s).", attempt + 1)
-
-                attempt += 1
-                if attempt >= max_attempts_before_persist:
-                    if _id is None:
-                        try:
-                            await save_queued_message(user_id, channel_id, prompt)
-                            log.info("💾 Persisted queued message after %s attempts user=%s", attempt, user_id)
-                        except Exception as e:
-                            log.error("❌ Failed to persist queued message: %s", e)
-                    else:
-                        log.info("💾 Leaving message in DB id=%s for later retry.", _id)
-                    break
-
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 60)
-
-        except Exception as e:
-            log.error("❌ Unexpected retry_worker error: %s", e)
-            try:
-                if _id is None and user_id is not None:
-                    await save_queued_message(user_id, channel_id, prompt)
-                    log.info("💾 Persisted queued message due to unexpected error.")
-            except Exception as e2:
-                log.error("❌ Failed to persist after unexpected error: %s", e2)
-        finally:
-            try:
-                retry_queue.task_done()
-            except Exception:
-                pass
+            await queue_mgr.task_done(_id)
                 
 # ------------------------
 # SQLite setup
@@ -573,7 +390,7 @@ async def fetch_profile_from_db(user_id: int):
         return None
 
 # ------------------------
-# New: Long-term summary and short-term context cache
+# Long-term summary and short-term context cache
 # ------------------------
 async def summarize_user_history(user_id, channel_id):
     try:
@@ -886,7 +703,7 @@ async def periodic_context_updater():
 # ------------------------
 @bot.event
 async def on_ready():
-    global db, http_client, queue_db, db_lock, queue_db_lock
+    global db, http_client, db_lock, queue_db_lock
     log.info("🔌 on_ready triggered - initializing DBs and background tasks.")
     db = await aiosqlite.connect(DB_FILE)
     db_lock = asyncio.Lock()
@@ -960,29 +777,12 @@ async def on_ready():
         await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
         await db.commit()
 
-    # queue persistence
-    queue_db = await aiosqlite.connect(QUEUE_DB)
-    await queue_db.execute("""
-    CREATE TABLE IF NOT EXISTS queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        channel_id TEXT,
-        prompt TEXT
-    )
-    """)
-    await queue_db.commit()
-
-    try:
-        await load_queued_messages()
-    except Exception as e:
-        log.error("❌ Failed to load queued messages during startup: %s", e)
-
     # shared http client for API calls
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
-    # start workers
-    asyncio.create_task(message_worker())
-    asyncio.create_task(retry_worker())
+    # initialize queue manager and start worker
+    await queue_mgr.init()
+    asyncio.create_task(queue_worker())
 
     # once-per-day reflection
     async def daily_reflection():
@@ -1066,9 +866,8 @@ async def on_ready():
 # Ask OpenRouter (with user-awareness)
 # ------------------------
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> Optional[str]:
-    # If we're out of quota, persist the prompt and return None
     if not await can_make_request():
-        await save_queued_message(user_id, channel_id, prompt)
+        await queue_mgr.enqueue(user_id, channel_id, prompt)
         return None
 
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -1227,35 +1026,24 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
 async def on_message(message):
     if message.author == bot.user:
         return
-
-    # Always upsert profile when we see a user (keeps display_name fresh)
     try:
         await upsert_user_profile(message.author)
     except Exception:
         pass
-
     if bot.user in message.mentions:
         now = time.time()
         last_used = user_cooldowns.get(message.author.id, 0)
         if now - last_used < COOLDOWN_SECONDS:
             await bot.process_commands(message)
             return
-
         user_cooldowns[message.author.id] = now
-
-        # remove both <@123> and <@!123> mention forms robustly
         user_input = re.sub(rf"<@!?\s*{bot.user.id}\s*>", "", message.content).strip() or "What?"
         delay = random.uniform(2, 20)
         await asyncio.sleep(delay)
-
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
-
         if reply:
-            # Do NOT include a mention when replying to a user's message.
-            # Put the tuple (content, reply_to_message) so message_worker can reply without mentioning.
             typing = random.random() < 0.8
-            await message_queue.put((message.channel, (reply, message), typing))
-
+            await safe_send(message.channel, reply)
     await bot.process_commands(message)
 
 # ------------------------
@@ -1280,28 +1068,15 @@ async def persona(ctx):
 @bot.command()
 async def queue(ctx):
     """Show queued message counts."""
-    mem_count = retry_queue.qsize()
-    async with queue_db.execute("SELECT COUNT(*) FROM queue") as cursor:
-        row = await cursor.fetchone()
-    db_count = row[0] if row else 0
-    total = mem_count + db_count
+    total, mem_count, db_count = await queue_mgr.pending_count()
     await ctx.send(f"📨 Queued messages: {total} (memory: {mem_count}, stored: {db_count})")
 
 @bot.command()
 @has_permissions(administrator=True)
 async def clearqueue(ctx):
     """Clear all queued messages."""
-    cleared_mem = 0
-    while not retry_queue.empty():
-        try:
-            retry_queue.get_nowait()
-            retry_queue.task_done()
-            cleared_mem += 1
-        except Exception:
-            break
-    await queue_db.execute("DELETE FROM queue")
-    await queue_db.commit()
-    await ctx.send(f"🗑️ Cleared {cleared_mem} messages from memory and wiped persistent queue.")
+    await queue_mgr.clear()
+    await ctx.send(f"🗑️ Cleared queued messages from memory and persistent queue.")
 
 @bot.command()
 @has_permissions(administrator=True)
