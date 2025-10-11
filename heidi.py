@@ -85,6 +85,7 @@ async def safe_send(channel: discord.abc.Messageable, content: str, max_len: int
 
 queue_mgr = QueueManager("queued_messages.db")
 memory_mgr = MemoryManager("heidi_memory.db")  # NEW MemoryManager instance
+db_ready_event = asyncio.Event()  # Signal when DB is initialized
 
 async def queue_worker():
     while True:
@@ -120,6 +121,7 @@ async def on_ready():
 
     # INIT MEMORY MANAGER
     await memory_mgr.init()
+    db_ready_event.set()  # Signal DB is ready
 
     http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
@@ -128,6 +130,7 @@ async def on_ready():
 
     async def daily_reflection():
         await bot.wait_until_ready()
+        await db_ready_event.wait()  # Wait for DB to be ready
         while not bot.is_closed():
             try:
                 interactions = await memory_mgr.load_recent_interactions(limit=10)
@@ -143,6 +146,7 @@ async def on_ready():
 # Ask OpenRouter
 # ------------------------
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> Optional[str]:
+    await db_ready_event.wait()  # Ensure DB is initialized
     if not await can_make_request():
         await queue_mgr.enqueue(user_id, channel_id, prompt)
         return None
@@ -240,6 +244,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
 # ------------------------
 @bot.event
 async def on_message(message):
+    await db_ready_event.wait()  # Ensure DB is initialized
     if message.author == bot.user:
         return
     try:
@@ -268,12 +273,14 @@ async def on_message(message):
 @bot.command()
 @has_permissions(administrator=True)
 async def reflect(ctx):
+    await db_ready_event.wait()
     interactions = await memory_mgr.load_recent_interactions(limit=10)
     await reflect_and_update_persona(memory_mgr.db, http_client, OPENROUTER_API_KEY, interactions)
     await ctx.send("Persona reflection done. Check logs for updates.")
 
 @bot.command()
 async def persona(ctx):
+    await db_ready_event.wait()
     persona = await get_persona(memory_mgr.db)
     if not persona:
         await ctx.send("No persona set.")
@@ -282,18 +289,21 @@ async def persona(ctx):
 
 @bot.command()
 async def queue(ctx):
+    await db_ready_event.wait()
     total, mem_count, db_count = await queue_mgr.pending_count()
     await ctx.send(f"📨 Queued messages: {total} (memory: {mem_count}, stored: {db_count})")
 
 @bot.command()
 @has_permissions(administrator=True)
 async def clearqueue(ctx):
+    await db_ready_event.wait()
     await queue_mgr.clear()
     await ctx.send(f"🗑️ Cleared queued messages from memory and persistent queue.")
 
 @bot.command()
 @has_permissions(administrator=True)
 async def setpersona(ctx, *, text: str):
+    await db_ready_event.wait()
     try:
         await set_persona(memory_mgr.db, text)
         await ctx.send("✅ Persona updated successfully.")
@@ -305,6 +315,7 @@ async def setpersona(ctx, *, text: str):
 @bot.command()
 @has_permissions(administrator=True)
 async def randommsg(ctx):
+    await db_ready_event.wait()
     guild = ctx.guild
     if not guild:
         await ctx.send("❌ This command must be run inside a server.")
@@ -349,6 +360,7 @@ async def randommsg(ctx):
 @bot.command()
 @has_permissions(administrator=True)
 async def runsummaries(ctx):
+    await db_ready_event.wait()
     await ctx.send("Starting manual summarization pass...")
     try:
         async with memory_mgr.db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cur:
@@ -376,6 +388,7 @@ async def runsummaries(ctx):
 @bot.command()
 @has_permissions(administrator=True)
 async def resetmemory(ctx):
+    await db_ready_event.wait()
     confirm_msg = await ctx.send(
         "⚠️ This will permanently erase all memory, persona reflections, summaries, and queues. Type `confirm` within 15 seconds to proceed."
     )
