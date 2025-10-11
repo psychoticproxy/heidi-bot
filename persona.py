@@ -30,7 +30,7 @@ INTERACTION BOUNDARIES:
 """
 
 # Model management
-MODEL_MAIN = "tngtech/deepseek-r1t2-chimera:free"
+MODEL_MAIN = "deepseek/deepseek-chat-v3.1:free"
 MODEL_SUMMARY = "deepseek/deepseek-chat-v3.1:free"
 MODEL_REFLECTION = "deepseek/deepseek-chat-v3.1:free"
 
