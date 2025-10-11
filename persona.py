@@ -35,7 +35,7 @@ MODEL_SUMMARY = "deepseek/deepseek-chat-v3.1:free"
 MODEL_REFLECTION = "deepseek/deepseek-chat-v3.1:free"
 
 log = logging.getLogger("heidi.persona")
-OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://api.openrouter.ai/v1/chat/completions")
+OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/v1/chat/completions")
 
 async def get_persona(db):
     try:
