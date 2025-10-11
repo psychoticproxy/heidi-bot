@@ -18,7 +18,7 @@ from queue_manager import QueueManager
 from persona import (
     get_persona, set_persona, get_model, render_system_prompt,
     render_user_mapping, reflect_and_update_persona, DEFAULT_PERSONA,
-    render_summary_prompt, render_guild_summary_prompt
+    render_summary_prompt, render_guild_summary_prompt, OPENROUTER_API_URL
 )
 from memory import MemoryManager  # NEW IMPORT
 
@@ -209,7 +209,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     client_to_use = http_client
     try:
         resp = await client_to_use.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_URL,
             headers={
                 "authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "referer": "https://discord.com",
@@ -222,6 +222,13 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
             log.warning("⚠️ Rate limited by OpenRouter.")
             await asyncio.sleep(30)
             return None
+        if resp.status_code != 200:
+            try:
+                body = await resp.text()
+            except Exception:
+                body = "<couldn't read response body>"
+            log.error("❌ OpenRouter returned %s: %s", resp.status_code, body)
+            resp.raise_for_status()
         resp.raise_for_status()
         data = resp.json()
         reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
