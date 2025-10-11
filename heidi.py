@@ -795,17 +795,6 @@ async def on_ready():
             await asyncio.sleep(86400)  # once every 24 hours
     asyncio.create_task(daily_reflection())
 
-    # periodic loader to pick up persisted queued messages
-    async def periodic_queue_loader():
-        await bot.wait_until_ready()
-        while not bot.is_closed():
-            try:
-                await load_queued_messages()
-            except Exception as e:
-                log.error("❌ Error in periodic_queue_loader: %s", e)
-            await asyncio.sleep(30)  # check every 30 seconds
-    asyncio.create_task(periodic_queue_loader())
-
     # daily random message loop - improved to search guilds for configured channel/role
     async def daily_random_message():
         await bot.wait_until_ready()
@@ -850,7 +839,6 @@ async def on_ready():
                     continue
                 content = reply.strip()
                 typing = random.random() < 0.8
-                await message_queue.put((target_channel, content, typing))
             except Exception as e:
                 log.error("❌ Error in daily message loop: %s", e)
                 await asyncio.sleep(3600)
@@ -863,7 +851,7 @@ async def on_ready():
     log.info("✅ Logged in as %s", bot.user.name)
 
 # ------------------------
-# Ask OpenRouter (with user-awareness)
+# Ask OpenRouter
 # ------------------------
 async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_user) -> Optional[str]:
     if not await can_make_request():
@@ -996,7 +984,6 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited by OpenRouter.")
             await asyncio.sleep(30)
-            await save_queued_message(user_id, channel_id, prompt)
             return None
 
         resp.raise_for_status()
@@ -1006,8 +993,6 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
             reply = ""
     except Exception as e:
         log.error("❌ API error: %s", e)
-        # Persist the prompt for retry later
-        await save_queued_message(user_id, channel_id, prompt)
         return None
 
     # Save user and assistant messages into memory (best-effort)
@@ -1132,9 +1117,6 @@ async def randommsg(ctx):
 
     content = reply.strip()
     typing = random.random() < 0.8
-
-    # send message to the target channel, not as a reply
-    await message_queue.put((channel, content, typing))
     
     await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
@@ -1206,13 +1188,6 @@ async def resetmemory(ctx):
             await db.commit()
             await db.execute("INSERT INTO persona (id, text) VALUES (?, ?)", (1, DEFAULT_PERSONA))
             await db.commit()
-
-        await queue_db.execute("DELETE FROM queue")
-        await queue_db.commit()
-
-        while not retry_queue.empty():
-            retry_queue.get_nowait()
-            retry_queue.task_done()
 
         await ctx.send("🧠 All memories, summaries, and persona wiped. Heidi has been fully reset.")
         log.warning("🧨 Heidi's memory and persona have been reset by %s.", ctx.author)
