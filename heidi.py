@@ -23,6 +23,8 @@ from persona import (
 )
 
 PROXY_ID = 1248244979151671398
+ROLE_ID = 1425102962556145676
+CHANNEL_ID = 1385570983062278268
 
 # ------------------------
 # Logging setup
@@ -806,10 +808,6 @@ async def resetmemory(ctx):
 async def on_command_error(ctx, error):
     if isinstance(error, CheckFailure):
         await ctx.send("⛔ You don’t have permission to use that command.")
-
-ROLE_ID = 1425102962556145676
-CHANNEL_ID = 1385570983062278268
-
 if not DISCORD_BOT_TOKEN:
     log.error("❌ DISCORD_BOT_TOKEN not configured in environment. Exiting.")
 else:
