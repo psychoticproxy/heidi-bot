@@ -271,7 +271,9 @@ async def on_message(message):
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
         if reply:
             typing = random.random() < 0.8
-            await safe_send(message.channel, reply)
+            for i in range(0, len(reply), 2000):
+                chunk = reply[i:i+2000]
+                await message.reply(chunk, mention_author=True)
     await bot.process_commands(message)
 
 # ------------------------
@@ -361,7 +363,11 @@ async def randommsg(ctx):
     content = reply.strip()
     typing = random.random() < 0.8
     
-    await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
+    if typing:
+    async with channel.typing():
+        await asyncio.sleep(random.uniform(1, 3))
+await safe_send(channel, content)
+await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
 @bot.command()
