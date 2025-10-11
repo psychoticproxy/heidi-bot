@@ -362,12 +362,12 @@ async def randommsg(ctx):
 
     content = reply.strip()
     typing = random.random() < 0.8
-    
+
     if typing:
-     async with channel.typing():
-        await asyncio.sleep(random.uniform(1, 3))
-await safe_send(channel, content)
-await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
+        async with channel.typing():
+            await asyncio.sleep(random.uniform(1, 3))
+    await safe_send(channel, content)
+    await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
     log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
 
 @bot.command()
