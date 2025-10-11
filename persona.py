@@ -141,7 +141,7 @@ async def reflect_and_update_persona(db, http_client, api_key, recent_interactio
         resp = await http_client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
                 "X-Title": "Heidi Discord Bot",
             },
