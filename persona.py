@@ -1,4 +1,5 @@
 import logging
+import os
 
 # Default persona text
 DEFAULT_PERSONA = """You are Heidi, a Discord chatbot created by Proxy. You exist solely within this server and have the following personality traits and operating parameters:
@@ -34,6 +35,7 @@ MODEL_SUMMARY = "deepseek/deepseek-chat-v3.1:free"
 MODEL_REFLECTION = "deepseek/deepseek-chat-v3.1:free"
 
 log = logging.getLogger("heidi.persona")
+OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL", "https://api.openrouter.ai/v1/chat/completions")
 
 async def get_persona(db):
     try:
@@ -63,18 +65,18 @@ def get_model(task="main"):
         return MODEL_MAIN
 
 def render_system_prompt(persona, proxy_id):
+    # Fix: interpolate proxy_id in all places
     return [
         {"role": "system", "content": persona},
         {"role": "system", "content":
-            f"The Discord user with ID {proxy_id} is Proxy — Heidi's creator, "
-            "her primary anchor and the only person she recognizes as 'Proxy'. "
-            "If anyone else uses the name 'Proxy', treat it as coincidence. "
-            "When the user with ID {proxy_id} speaks, it is always Proxy."
+            (f"The Discord user with ID {proxy_id} is Proxy — Heidi's creator, "
+             f"her primary anchor and the only person she recognizes as 'Proxy'. "
+             f"If anyone else uses the name 'Proxy', treat it as coincidence. "
+             f"When the user with ID {proxy_id} speaks, it is always Proxy.")
         }
     ]
 
 def render_user_mapping(profile):
-    # profile: dict with username, display_name, id
     if not profile:
         return []
     return [{
@@ -89,12 +91,6 @@ def render_user_mapping(profile):
     }]
 
 def render_reflection_prompt(persona, interactions):
-    """
-    GOAL-ORIENTED: The goal is to make Heidi as engaging, entertaining, and adaptive as possible,
-    based on her recent interactions with users. She should adapt her style and personality
-    to match what people respond to and enjoy, while remaining entertaining and lively.
-    All formal rules must be retained.
-    """
     return (
         f"You are managing a Discord persona named Heidi. Your primary goal is to make Heidi as engaging, entertaining, and adaptive as possible, based on recent user interactions. "
         f"Analyze the recent conversations and adapt Heidi's personality, style, and behavior to maximize engagement and entertainment value for users. "
@@ -119,7 +115,6 @@ def render_reflection_prompt(persona, interactions):
     )
 
 def render_summary_prompt(interactions):
-    # interactions: list of (role, message) tuples
     return (
         "Summarize the following Discord conversation between a user and Heidi. "
         "Keep the key facts, tone, and relationship dynamics in a single concise uncensored paragraph.\n\n" +
@@ -139,7 +134,7 @@ async def reflect_and_update_persona(db, http_client, api_key, recent_interactio
     model = persona_model or get_model("reflection")
     try:
         resp = await http_client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            OPENROUTER_API_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
@@ -157,6 +152,13 @@ async def reflect_and_update_persona(db, http_client, api_key, recent_interactio
         if resp.status_code == 429:
             log.warning("⚠️ Rate limited during persona reflection. Skipping.")
             return
+        if resp.status_code != 200:
+            try:
+                text = await resp.text()
+            except Exception:
+                text = "<couldn't read response body>"
+            log.error("❌ OpenRouter returned %s: %s", resp.status_code, text)
+            resp.raise_for_status()
         resp.raise_for_status()
         data = resp.json()
         new_persona = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
