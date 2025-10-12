@@ -426,18 +426,18 @@ async def resetmemory(ctx):
 
 @bot.command()
 async def summarize(ctx):
-    """Summarizes the last 100 messages in the current channel and outputs the summary."""
+    """Summarizes the most recent 100 messages in the current channel and outputs the summary."""
     await db_ready_event.wait()
     channel = ctx.channel
 
     messages = []
-    async for msg in channel.history(limit=100, oldest_first=True):
-        # Only include user or bot messages (not system, pins, etc.)
+    async for msg in channel.history(limit=100):  # Remove oldest_first
         role = "heidi" if msg.author == bot.user else "user"
         messages.append((role, msg.content.strip()))
 
     # Remove empty messages
     messages = [(role, content) for role, content in messages if content]
+    messages.reverse()  # Make chronological order
 
     if not messages:
         await ctx.send("❌ No messages to summarize.")
@@ -484,9 +484,7 @@ async def summarize(ctx):
     except Exception as e:
         log.error("❌ Error during channel summarization: %s", e)
         await ctx.send("❌ Error during summarization. Check logs.")
-
-# ... (rest of your code)
-
+        
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, CheckFailure):
