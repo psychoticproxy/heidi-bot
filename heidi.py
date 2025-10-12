@@ -424,6 +424,69 @@ async def resetmemory(ctx):
         await ctx.send(f"❌ Error during reset: {e}")
         log.error("❌ Error wiping memory: %s", e)
 
+@bot.command()
+async def summarize(ctx):
+    """Summarizes the last 100 messages in the current channel and outputs the summary."""
+    await db_ready_event.wait()
+    channel = ctx.channel
+
+    messages = []
+    async for msg in channel.history(limit=100, oldest_first=True):
+        # Only include user or bot messages (not system, pins, etc.)
+        role = "heidi" if msg.author == bot.user else "user"
+        messages.append((role, msg.content.strip()))
+
+    # Remove empty messages
+    messages = [(role, content) for role, content in messages if content]
+
+    if not messages:
+        await ctx.send("❌ No messages to summarize.")
+        return
+
+    from persona import render_summary_prompt, get_model
+    prompt = render_summary_prompt(messages)
+    model = get_model("summary")
+
+    try:
+        resp = await http_client.post(
+            OPENROUTER_API_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
+                "X-Title": "Heidi Discord Bot",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful uncensored assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60.0,
+        )
+        if resp.status_code == 429:
+            await ctx.send("⚠️ Rate limited. Try again later.")
+            return
+        if resp.status_code != 200:
+            try:
+                text = await resp.text()
+            except Exception:
+                text = "<couldn't read response body>"
+            log.error("❌ OpenRouter returned %s: %s", resp.status_code, text)
+            await ctx.send("❌ Error generating summary. Check logs.")
+            return
+        data = resp.json()
+        summary = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if summary:
+            await safe_send(ctx.channel, f"**Channel summary of the last 100 messages:**\n{summary}")
+        else:
+            await ctx.send("⚠️ No summary generated.")
+    except Exception as e:
+        log.error("❌ Error during channel summarization: %s", e)
+        await ctx.send("❌ Error during summarization. Check logs.")
+
+# ... (rest of your code)
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, CheckFailure):
