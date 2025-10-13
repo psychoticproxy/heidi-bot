@@ -6,9 +6,18 @@ from discord.ext.commands import has_permissions, CheckFailure
 log = logging.getLogger("heidi.commands")
 
 def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, PROXY_ID, ROLE_ID, CHANNEL_ID, db_ready_event, safe_send, ask_openrouter, set_persona, get_persona, DEFAULT_PERSONA):
+    def ensure_http_client(ctx):
+        if http_client is None:
+            asyncio.create_task(ctx.send("❌ Internal error: HTTP client not initialized. Try again in a few seconds."))
+            log.error("http_client is None in command %s", getattr(ctx, 'command', '<unknown>'))
+            return False
+        return True
+
     @bot.command()
     @has_permissions(administrator=True)
     async def reflect(ctx):
+        if not ensure_http_client(ctx):
+            return
         await db_ready_event.wait()
         interactions = await memory_mgr.load_recent_interactions(limit=10)
         from persona import reflect_and_update_persona
@@ -101,6 +110,8 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
     @bot.command()
     @has_permissions(administrator=True)
     async def runsummaries(ctx):
+        if not ensure_http_client(ctx):
+            return
         await db_ready_event.wait()
         await ctx.send("Starting manual summarization pass...")
         try:
@@ -155,6 +166,8 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
     @bot.command()
     async def summarize(ctx):
         """Summarizes the most recent 100 messages in the current channel and outputs the summary."""
+        if not ensure_http_client(ctx):
+            return
         await db_ready_event.wait()
         channel = ctx.channel
 
@@ -219,6 +232,8 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
         Summarizes the entire available message history of the specified user in the current channel.
         Usage: !summarizeuser @username or !summarizeuser user_id
         """
+        if not ensure_http_client(ctx):
+            return
         await db_ready_event.wait()
         channel_id = ctx.channel.id
 
@@ -250,7 +265,7 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
 
         await ctx.send(f"🔎 Summarizing history for {target_user.display_name} in this channel...")
 
-        # This will fetch up to 50 messages per `memory.py` but can be tweaked there
+        # Defensive: If http_client is None, don't call summarization
         await memory_mgr.summarize_user_history(target_user.id, channel_id, http_client, OPENROUTER_API_KEY)
 
         summary = await memory_mgr.get_summary(target_user.id, channel_id)
