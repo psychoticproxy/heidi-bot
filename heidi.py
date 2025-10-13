@@ -271,9 +271,13 @@ async def on_message(message):
         reply = await ask_openrouter(message.author.id, message.channel.id, user_input, message.author)
         if reply:
             typing = random.random() < 0.8
+            if typing:
+                async with message.channel.typing():
+                    await asyncio.sleep(random.uniform(1, 3))
             for i in range(0, len(reply), 2000):
                 chunk = reply[i:i+2000]
                 await message.reply(chunk, mention_author=True)
+                
     await bot.process_commands(message)
 
 # ------------------------
