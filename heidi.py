@@ -21,6 +21,7 @@ from persona import (
 )
 from memory import MemoryManager
 from commands import setup_commands
+import globals  # <--- NEW: import the globals module
 
 PROXY_ID = 1248244979151671398
 ROLE_ID = 1425102962556145676
@@ -109,21 +110,23 @@ async def queue_worker():
         finally:
             await queue_mgr.task_done(_id)
 
-http_client: Optional[httpx.AsyncClient] = None
+# http_client: Optional[httpx.AsyncClient] = None
+# Remove the above and use globals.http_client
 
 # ------------------------
 # Bot events
 # ------------------------
 @bot.event
 async def on_ready():
-    global http_client
+    # global http_client
     log.info("🔌 on_ready triggered - initializing DBs and background tasks.")
 
     # INIT MEMORY MANAGER
     await memory_mgr.init()
     db_ready_event.set()  # Signal DB is ready
 
-    http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
+    # http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
+    globals.http_client = httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=30.0)
 
     await queue_mgr.init()
     asyncio.create_task(queue_worker())
@@ -134,7 +137,7 @@ async def on_ready():
         while not bot.is_closed():
             try:
                 interactions = await memory_mgr.load_recent_interactions(limit=10)
-                await reflect_and_update_persona(memory_mgr.db, http_client, OPENROUTER_API_KEY, interactions)
+                await reflect_and_update_persona(memory_mgr.db, globals.http_client, OPENROUTER_API_KEY, interactions)
             except Exception as e:
                 log.error("❌ daily_reflection task error: %s", e)
             await asyncio.sleep(86400)
@@ -206,7 +209,7 @@ async def ask_openrouter(user_id: int, channel_id: int, prompt: str, discord_use
     messages.append({"role": "user", "content": prompt})
 
     model = get_model("main")
-    client_to_use = http_client
+    client_to_use = globals.http_client
     try:
         resp = await client_to_use.post(
             OPENROUTER_API_URL,
