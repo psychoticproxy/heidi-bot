@@ -211,7 +211,54 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
         except Exception as e:
             log.error("❌ Error during channel summarization: %s", e)
             await ctx.send("❌ Error during summarization. Check logs.")
+            
+    @bot.command()
+    @has_permissions(administrator=True)
+    async def summarizeuser(ctx, member: str = None):
+        """
+        Summarizes the entire available message history of the specified user in the current channel.
+        Usage: !summarizeuser @username or !summarizeuser user_id
+        """
+        await db_ready_event.wait()
+        channel_id = ctx.channel.id
 
+        # Resolve member if mention or ID is given
+        target_user = None
+        if member:
+            # Try mention
+            if member.startswith("<@") and member.endswith(">"):
+                user_id = int(member.replace("<@", "").replace("!", "").replace(">", ""))
+                target_user = ctx.guild.get_member(user_id)
+            else:
+                # Try by ID
+                try:
+                    user_id = int(member)
+                    target_user = ctx.guild.get_member(user_id)
+                except ValueError:
+                    # Try by name
+                    for m in ctx.guild.members:
+                        if m.name == member or getattr(m, "display_name", None) == member:
+                            target_user = m
+                            break
+        else:
+            await ctx.send("❌ Please specify a user mention, username, or user ID.")
+            return
+
+        if not target_user:
+            await ctx.send("❌ User not found. Please mention the user or provide their ID.")
+            return
+
+        await ctx.send(f"🔎 Summarizing history for {target_user.display_name} in this channel...")
+
+        # This will fetch up to 50 messages per `memory.py` but can be tweaked there
+        await memory_mgr.summarize_user_history(target_user.id, channel_id, http_client, OPENROUTER_API_KEY)
+
+        summary = await memory_mgr.get_summary(target_user.id, channel_id)
+        if summary:
+            await safe_send(ctx.channel, f"**Summary of {target_user.display_name}'s history:**\n{summary}")
+        else:
+            await ctx.send("⚠️ No summary could be generated (user may have no messages or API error).")
+            
     @bot.event
     async def on_command_error(ctx, error):
         if isinstance(error, CheckFailure):
