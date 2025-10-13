@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import asyncio
+import httpx
 import random
 import time
 import logging
