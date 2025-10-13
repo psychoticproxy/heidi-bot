@@ -287,7 +287,6 @@ setup_commands(
     bot=bot,
     memory_mgr=memory_mgr,
     queue_mgr=queue_mgr,
-    http_client=http_client,
     OPENROUTER_API_KEY=OPENROUTER_API_KEY,
     PROXY_ID=PROXY_ID,
     ROLE_ID=ROLE_ID,
