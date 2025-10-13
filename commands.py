@@ -5,9 +5,17 @@ from discord.ext.commands import has_permissions, CheckFailure
 
 log = logging.getLogger("heidi.commands")
 
-def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, PROXY_ID, ROLE_ID, CHANNEL_ID, db_ready_event, safe_send, ask_openrouter, set_persona, get_persona, DEFAULT_PERSONA):
+def setup_commands(bot, memory_mgr, queue_mgr, OPENROUTER_API_KEY, PROXY_ID, ROLE_ID, CHANNEL_ID, db_ready_event, safe_send, ask_openrouter, set_persona, get_persona, DEFAULT_PERSONA):
+    # Use global http_client so it updates after on_ready
+    import sys
+    module_globals = sys.modules[__name__].__dict__
+
+    def get_http_client():
+        return module_globals.get('http_client', None)
+
     def ensure_http_client(ctx):
-        if http_client is None:
+        client = get_http_client()
+        if client is None:
             asyncio.create_task(ctx.send("❌ Internal error: HTTP client not initialized. Try again in a few seconds."))
             log.error("http_client is None in command %s", getattr(ctx, 'command', '<unknown>'))
             return False
@@ -21,7 +29,7 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
         await db_ready_event.wait()
         interactions = await memory_mgr.load_recent_interactions(limit=10)
         from persona import reflect_and_update_persona
-        await reflect_and_update_persona(memory_mgr.db, http_client, OPENROUTER_API_KEY, interactions)
+        await reflect_and_update_persona(memory_mgr.db, get_http_client(), OPENROUTER_API_KEY, interactions)
         await ctx.send("Persona reflection done. Check logs for updates.")
 
     @bot.command()
@@ -118,7 +126,7 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
             async with memory_mgr.db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cur:
                 rows = await cur.fetchall()
             for user_id, channel_id in rows:
-                await memory_mgr.summarize_user_history(user_id, channel_id, http_client, OPENROUTER_API_KEY)
+                await memory_mgr.summarize_user_history(user_id, channel_id, get_http_client(), OPENROUTER_API_KEY)
                 await asyncio.sleep(1)
 
             async with memory_mgr.db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
@@ -129,7 +137,7 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
                 if ch and getattr(ch, "guild", None):
                     guild_ids.add(str(ch.guild.id))
             for gid in guild_ids:
-                await memory_mgr.summarize_guild_history(gid, bot, http_client, OPENROUTER_API_KEY)
+                await memory_mgr.summarize_guild_history(gid, bot, get_http_client(), OPENROUTER_API_KEY)
                 await asyncio.sleep(1)
 
             await ctx.send("Manual summarization complete.")
@@ -188,7 +196,7 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
         model = get_model("summary")
 
         try:
-            resp = await http_client.post(
+            resp = await get_http_client().post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -224,7 +232,7 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
         except Exception as e:
             log.error("❌ Error during channel summarization: %s", e)
             await ctx.send("❌ Error during summarization. Check logs.")
-            
+
     @bot.command()
     @has_permissions(administrator=True)
     async def summarizeuser(ctx, member: str = None):
@@ -265,15 +273,14 @@ def setup_commands(bot, memory_mgr, queue_mgr, http_client, OPENROUTER_API_KEY, 
 
         await ctx.send(f"🔎 Summarizing history for {target_user.display_name} in this channel...")
 
-        # Defensive: If http_client is None, don't call summarization
-        await memory_mgr.summarize_user_history(target_user.id, channel_id, http_client, OPENROUTER_API_KEY)
+        await memory_mgr.summarize_user_history(target_user.id, channel_id, get_http_client(), OPENROUTER_API_KEY)
 
         summary = await memory_mgr.get_summary(target_user.id, channel_id)
         if summary:
             await safe_send(ctx.channel, f"**Summary of {target_user.display_name}'s history:**\n{summary}")
         else:
             await ctx.send("⚠️ No summary could be generated (user may have no messages or API error).")
-            
+
     @bot.event
     async def on_command_error(ctx, error):
         if isinstance(error, CheckFailure):
