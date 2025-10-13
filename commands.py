@@ -2,16 +2,13 @@ import random
 import asyncio
 import logging
 from discord.ext.commands import has_permissions, CheckFailure
+import globals  # <--- NEW: import the globals module
 
 log = logging.getLogger("heidi.commands")
 
 def setup_commands(bot, memory_mgr, queue_mgr, OPENROUTER_API_KEY, PROXY_ID, ROLE_ID, CHANNEL_ID, db_ready_event, safe_send, ask_openrouter, set_persona, get_persona, DEFAULT_PERSONA):
-    # Use global http_client so it updates after on_ready
-    import sys
-    module_globals = sys.modules[__name__].__dict__
-
     def get_http_client():
-        return module_globals.get('http_client', None)
+        return globals.http_client  # <--- Use the shared globals.http_client
 
     def ensure_http_client(ctx):
         client = get_http_client()
