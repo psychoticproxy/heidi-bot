@@ -249,6 +249,9 @@ def setup_commands(bot, memory_mgr, queue_mgr, OPENROUTER_API_KEY, PROXY_ID, ROL
             if member.startswith("<@") and member.endswith(">"):
                 user_id = int(member.replace("<@", "").replace("!", "").replace(">", ""))
                 target_user = ctx.guild.get_member(user_id)
+             except ValueError:
+                 await ctx.send("❌ Invalid user mention format.")
+                 return
             else:
                 # Try by ID
                 try:
@@ -270,8 +273,13 @@ def setup_commands(bot, memory_mgr, queue_mgr, OPENROUTER_API_KEY, PROXY_ID, ROL
 
         await ctx.send(f"🔎 Summarizing history for {target_user.display_name} in this channel...")
 
-        await memory_mgr.summarize_user_history(target_user.id, channel_id, get_http_client(), OPENROUTER_API_KEY)
-
+        try:
+            await memory_mgr.summarize_user_history(target_user.id, channel_id, get_http_client(), OPENROUTER_API_KEY)
+        except Exception as e:
+            log.error("❌ Error in summarizeuser command during summarization: %s", e)
+            await ctx.send(f"❌ Summarization failed: {str(e)}")
+            return
+            
         summary = await memory_mgr.get_summary(target_user.id, channel_id)
         if summary:
             await safe_send(ctx.channel, f"**Summary of {target_user.display_name}'s history:**\n{summary}")
