@@ -22,8 +22,6 @@ def run_web():
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_web, daemon=True).start()
-
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("heidi-simple")
 
