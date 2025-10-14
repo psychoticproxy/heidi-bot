@@ -4,6 +4,7 @@ import os
 import asyncio
 import random
 import logging
+import httpx
 from dotenv import load_dotenv
 from simplified_memory import ConversationMemory
 from engagement import EngagementEngine
