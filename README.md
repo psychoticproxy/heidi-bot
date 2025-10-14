@@ -1,6 +1,6 @@
-# Heidi Bot
+# Heidi
 
-Heidi Bot is a Discord chatbot focused on fast, adaptive, and entertaining conversation.
+Heidi is a Discord chatbot focused on fast, adaptive, and entertaining conversation.
 
 **Try Heidi:** [Join Proxy's Hideout](https://discord.com/invite/M6SfZAfsQh)
 
@@ -34,38 +34,9 @@ Persona rules and logic: [`persona.py`](./persona.py)
 - Start bot:  
   `python heidi.py`
 
-Invite Heidi and use these commands:
-- `!persona` – Show persona text
-- `!reflect` – Force persona adaptation (admin)
-- `!queue` – List queued messages
-- `!clearqueue` – Clear message queue (admin)
-- `!setpersona <text>` – Manually set persona (admin)
-- `!randommsg` – Random message to a user in a role (admin)
-- `!runsummaries` – Summarize user and guild histories (admin)
-- `!resetmemory` – Wipe all memory and persona (admin)
+Invite Heidi and use `!help` to see all commands.
 
 Heidi responds to direct mentions and commands.
-
-## Strengths
-
-- Fast, adaptive, and stays on-character
-- Handles rate limits and message delivery reliably
-- Persistent memory and robust persona management
-- Easily controlled by Discord admins
-
-## Limitations
-
-- Requires OpenRouter API (LLM) for responses and summaries; subject to rate limits
-- No support for complex roleplay, external plugins, or multi-server memory sharing
-
-## File Overview
-
-- [`heidi.py`](./heidi.py): Main bot logic
-- [`queue_manager.py`](./queue_manager.py): Message queue
-- [`persona.py`](./persona.py): Persona management
-- [`memory.py`](./memory.py): Memory and summaries
-- [`requirements.txt`](./requirements.txt): Dependencies
-- [`Dockerfile`](./Dockerfile): Docker build
 
 ## License
 
