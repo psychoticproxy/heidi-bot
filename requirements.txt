@@ -2,3 +2,4 @@ discord.py
 aiosqlite
 flask
 python-dotenv
+httpx
