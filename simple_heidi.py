@@ -11,6 +11,18 @@ from personality import AdaptivePersonality
 
 load_dotenv()
 
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web, daemon=True).start()
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("heidi-simple")
 
