@@ -1,4 +1,3 @@
-# engagement.py
 import random
 import asyncio
 from datetime import datetime, timedelta
@@ -10,10 +9,15 @@ class EngagementEngine:
         self.last_activity = {}
         
     async def should_engage(self, channel_id):
-        # Check if channel has been active recently
-        last_active = self.last_activity.get(channel_id, datetime.min)
-        return datetime.now() - last_active < timedelta(hours=2)
+        # Check if channel has been active recently (within last 2 hours)
+        last_active = self.last_activity.get(channel_id, 0)
+        current_time = asyncio.get_event_loop().time()
+        return current_time - last_active < 7200  # 2 hours in seconds
     
+    def update_activity(self, channel_id):
+        """Update last activity time for a channel"""
+        self.last_activity[channel_id] = asyncio.get_event_loop().time()
+        
     async def spontaneous_message(self, channel):
         if not await self.should_engage(channel.id):
             return None
