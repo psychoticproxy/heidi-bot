@@ -247,11 +247,12 @@ def setup_commands(bot, memory_mgr, queue_mgr, OPENROUTER_API_KEY, PROXY_ID, ROL
         if member:
             # Try mention
             if member.startswith("<@") and member.endswith(">"):
-                user_id = int(member.replace("<@", "").replace("!", "").replace(">", ""))
-                target_user = ctx.guild.get_member(user_id)
-             except ValueError:
-                 await ctx.send("❌ Invalid user mention format.")
-                 return
+                try:
+                    user_id = int(member.replace("<@", "").replace("!", "").replace(">", ""))
+                    target_user = ctx.guild.get_member(user_id)
+                except ValueError:
+                    await ctx.send("❌ Invalid user mention format.")
+                    return
             else:
                 # Try by ID
                 try:
