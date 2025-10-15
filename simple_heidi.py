@@ -107,7 +107,7 @@ class SimpleHeidi(discord.Client):
             log.error(f"❌ OpenRouter API error: {e}")
             return None
 
-    def build_system_prompt(self, context_messages user_interactions=0 is_unsolicited=False):
+    def build_system_prompt(self, context_messages, user_interactions=0, is_unsolicited=False):
         base_prompt = """You are Heidi, a Discord chatbot. You're curious, playful, and engage in natural conversations.
 
 CORE RULES:
@@ -158,7 +158,7 @@ CORE RULES:
         await self.memory.add_message(
             message.channel.id,
             message.author.display_name,
-            message.content
+            message.content,
             author_id=message.author.id
         )
 
