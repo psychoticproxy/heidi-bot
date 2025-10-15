@@ -88,7 +88,7 @@ class SimpleHeidi(discord.Client):
                     "X-Title": "Heidi Discord Bot",
                 },
                 json={
-                    "model": "tngtech/deepseek-r1t2-chimera:free",
+                    "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": 150,
@@ -174,6 +174,10 @@ CORE RULES:
         if message.author == self.user:
             return
 
+        # Load recent history if not already in memory
+        if message.channel.id not in self.memory.conversations:
+            await self.memory.load_channel_history(message.channel.id)
+
         await self.memory.add_message(
             message.channel.id,
             message.author.display_name,
@@ -191,7 +195,9 @@ CORE RULES:
             await self.unsolicited_participation(message)
 
     async def respond_to_mention(self, message):
+        log.info(f"📨 Mention from {message.author} in {message.channel.id}: {message.content}")
         context = await self.memory.get_recent_context(message.channel.id, limit=8)
+        log.info(f"📝 Context for {message.channel.id}: {context}")
 
         user_interactions = await self.memory.get_user_interaction_count(message.author.id)
         system_prompt = self.build_system_prompt(context, user_interactions)
@@ -215,9 +221,9 @@ CORE RULES:
             self.personality.adapt_from_interaction(message.content, True)
         else:
             fallback_responses = [
-                "Hey! What's up?",
-                "I'm here! What were you saying?",
-                "You mentioned me? What's going on?"
+                "https://tenor.com/view/bocchi-bocchi-the-rock-non-linear-gif-27023528",
+                "https://tenor.com/view/bocchi-the-rock-bocchi-roll-rolling-rolling-on-the-floor-gif-4645200487976536632",
+                "https://tenor.com/view/anime-fran-sleep-sleepy-tired-gif-8633431630979404250"
             ]
             response = random.choice(fallback_responses)
             await message.reply(response, mention_author=False)
