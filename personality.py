@@ -8,14 +8,14 @@ class AdaptivePersonality:
     def __init__(self, db_path="personality.db"):
         # Expanded base traits with new psychological dimensions
         self.base_traits = {
-            'curiosity': 0.7,
-            'playfulness': 1.0, 
-            'empathy': 0.3,
+            'curiosity': 0.5,
+            'playfulness': 0.5, 
+            'empathy': 0.5,
             'sarcasm': 0.5,
-            'enthusiasm': 0.3,
+            'enthusiasm': 0.5,
             'friendliness': 0.5,  # New: warmth and welcoming behavior
-            'humor': 1.0,         # New: tendency to use humor
-            'directness': 1.0     # New: straightforwardness vs. evasiveness
+            'humor': 0.5,         # New: tendency to use humor
+            'directness': 0.5     # New: straightforwardness vs. evasiveness
         }
         self.engagement_patterns = {}
         self.interaction_history = []
