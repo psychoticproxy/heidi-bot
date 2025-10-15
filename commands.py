@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 import logging
 import asyncio
+import os
 
 logger = logging.getLogger("heidi.commands")
 
@@ -20,9 +21,15 @@ class HeidiCommands:
             self.bot.tree.add_command(self.memory)
             self.bot.tree.add_command(self.help_command)
             
-            # Sync commands with Discord
-            await self.bot.tree.sync()
-            logger.info("Slash commands synced successfully")
+            # Sync commands to a specific guild if GUILD_ID is set
+            guild_id = os.getenv("GUILD_ID")
+            if guild_id:
+                guild = discord.Object(id=int(guild_id))
+                await self.bot.tree.sync(guild=guild)
+                logger.info(f"Slash commands synced to guild {guild_id}")
+            else:
+                await self.bot.tree.sync()  # Global sync
+                logger.info("Slash commands synced globally")
         except Exception as e:
             logger.error(f"Failed to sync slash commands: {e}")
 
