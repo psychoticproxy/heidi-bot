@@ -4,11 +4,12 @@ import json
 import aiosqlite
 
 class ConversationMemory:
-    def __init__(self, max_context=50, db_path="heidi_memory.db"):
+    def __init__(self, max_context=30, db_path="heidi_memory.db"):
         self.max_context = max_context
         self.db_path = db_path
         self.conversations = {}  # channel_id -> deque of messages
         self.db = None
+        self.user_profiles = {} # Add user awareness
 
     async def init(self):
         """Initialize database connection"""
@@ -20,6 +21,16 @@ class ConversationMemory:
                 content TEXT,
                 is_bot BOOLEAN,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Add user profiles table
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                interaction_count INTEGER DEFAULT 0,
+                last_interaction DATETIME,
+                preferences TEXT
             )
         """)
         await self.db.commit()
@@ -37,6 +48,18 @@ class ConversationMemory:
         
         self.conversations[channel_id].append(message_data)
         
+        # Update user profile
+        if author_id and not is_bot:
+            await self.update_user_profile(author_id, author)
+
+        # Save to database
+        if self.db:
+            await self.db.execute(
+                "INSERT INTO conversations (channel_id, author, author_id, content, is_bot) VALUES (?, ?, ?, ?, ?)",
+                (str(channel_id), author, str(author_id) if author_id else None, content, is_bot)
+            )
+            await self.db.commit()
+            
         # Also save to database for persistence
         if self.db:
             await self.db.execute(
@@ -44,6 +67,23 @@ class ConversationMemory:
                 (str(channel_id), author, content, is_bot)
             )
             await self.db.commit()
+            
+    async def update_user_profile(self, user_id, username):
+        """Update or create user profile"""
+        await self.db.execute("""
+            INSERT OR REPLACE INTO user_profiles (user_id, username, interaction_count, last_interaction)
+            VALUES (?, ?, COALESCE((SELECT interaction_count + 1 FROM user_profiles WHERE user_id = ?), 1), CURRENT_TIMESTAMP)
+        """, (user_id, username, user_id))
+        await self.db.commit()
+
+    async def get_user_interaction_count(self, user_id):
+        """Get how many times a user has interacted with the bot"""
+        async with self.db.execute(
+            "SELECT interaction_count FROM user_profiles WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 
     async def get_recent_context(self, channel_id, limit=10):
         """Get recent messages from a channel"""
