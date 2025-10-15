@@ -6,12 +6,16 @@ from datetime import datetime
 
 class AdaptivePersonality:
     def __init__(self, db_path="personality.db"):
+        # Expanded base traits with new psychological dimensions
         self.base_traits = {
             'curiosity': 0.7,
             'playfulness': 0.6, 
             'empathy': 0.5,
             'sarcasm': 0.3,
-            'enthusiasm': 0.8
+            'enthusiasm': 0.8,
+            'friendliness': 0.6,  # New: warmth and welcoming behavior
+            'humor': 0.4,         # New: tendency to use humor
+            'directness': 0.5     # New: straightforwardness vs. evasiveness
         }
         self.engagement_patterns = {}
         self.interaction_history = []
@@ -72,9 +76,10 @@ class AdaptivePersonality:
         await self.db.commit()
 
     def adapt_from_interaction(self, message, response_success=True, engagement_level=1.0):
-        """Adapt personality based on interaction success and engagement"""
+        """Adapt personality based on interaction success, engagement, and content"""
         words = message.lower().split()
         
+        # Track engagement patterns for specific words
         for word in words:
             if len(word) > 3:  # Only track meaningful words
                 if word in self.engagement_patterns:
@@ -91,10 +96,26 @@ class AdaptivePersonality:
                 else:
                     self.engagement_patterns[word] = 0.5
 
-        # Adjust base traits based on engagement
-        if response_success and engagement_level > 0.7:
-            self.base_traits['curiosity'] = min(1.0, self.base_traits['curiosity'] + 0.02)
-            self.base_traits['enthusiasm'] = min(1.0, self.base_traits['enthusiasm'] + 0.02)
+        # Adjust base traits based on engagement and content
+        if response_success:
+            # Boost positive traits on successful interactions
+            self.base_traits['curiosity'] = min(1.0, self.base_traits['curiosity'] + 0.02 * engagement_level)
+            self.base_traits['enthusiasm'] = min(1.0, self.base_traits['enthusiasm'] + 0.02 * engagement_level)
+            self.base_traits['friendliness'] = min(1.0, self.base_traits['friendliness'] + 0.02 * engagement_level)
+            
+            # Humor adapts if the message contains humorous words
+            humorous_words = {'lol', 'haha', 'funny', 'joke', 'lmao'}
+            if any(word in humorous_words for word in words):
+                self.base_traits['humor'] = min(1.0, self.base_traits['humor'] + 0.05 * engagement_level)
+            
+            # Directness adapts if the message is straightforward
+            direct_words = {'yes', 'no', 'direct', 'clear'}
+            if any(word in direct_words for word in words):
+                self.base_traits['directness'] = min(1.0, self.base_traits['directness'] + 0.03 * engagement_level)
+        else:
+            # Slight decay on failure to encourage adaptation
+            self.base_traits['friendliness'] = max(0.0, self.base_traits['friendliness'] - 0.05)
+            self.base_traits['humor'] = max(0.0, self.base_traits['humor'] - 0.05)
 
         # Save changes periodically (every 10 interactions)
         if len(self.interaction_history) % 10 == 0:
@@ -120,5 +141,19 @@ class AdaptivePersonality:
         base_temp = 0.7
         # Higher playfulness and enthusiasm = more creative/variable responses
         creativity_boost = (self.base_traits['playfulness'] + self.base_traits['enthusiasm']) * 0.1
-        return min(0.9, base_temp + creativity_boost)
+        # Humor adds a bit more variability
+        humor_boost = self.base_traits['humor'] * 0.05
+        return min(0.9, base_temp + creativity_boost + humor_boost)
 
+    def get_personality_summary(self):
+        """Generate a simple text summary of current personality for use in prompts"""
+        # Map trait values to descriptive words
+        traits_desc = []
+        for trait, value in self.base_traits.items():
+            if value > 0.7:
+                traits_desc.append(f"high {trait}")
+            elif value < 0.3:
+                traits_desc.append(f"low {trait}")
+            else:
+                traits_desc.append(f"moderate {trait}")
+        return ", ".join(traits_desc)
