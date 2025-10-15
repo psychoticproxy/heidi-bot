@@ -35,7 +35,7 @@ class ConversationMemory:
         """)
         await self.db.commit()
 
-    async def add_message(self, channel_id, author, content, is_bot=False):
+    async def add_message(self, channel_id, author, content, is_bot=False, author_id=None):
         """Add message to memory"""
         if channel_id not in self.conversations:
             self.conversations[channel_id] = deque(maxlen=self.max_context)
@@ -57,14 +57,6 @@ class ConversationMemory:
             await self.db.execute(
                 "INSERT INTO conversations (channel_id, author, author_id, content, is_bot) VALUES (?, ?, ?, ?, ?)",
                 (str(channel_id), author, str(author_id) if author_id else None, content, is_bot)
-            )
-            await self.db.commit()
-            
-        # Also save to database for persistence
-        if self.db:
-            await self.db.execute(
-                "INSERT INTO conversations (channel_id, author, content, is_bot) VALUES (?, ?, ?, ?)",
-                (str(channel_id), author, content, is_bot)
             )
             await self.db.commit()
             
