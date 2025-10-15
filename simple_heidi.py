@@ -107,7 +107,7 @@ class SimpleHeidi(discord.Client):
             log.error(f"❌ OpenRouter API error: {e}")
             return None
 
-    def build_system_prompt(self, context_messages, is_unsolicited=False):
+    def build_system_prompt(self, context_messages user_interactions=0 is_unsolicited=False):
         base_prompt = """You are Heidi, a Discord chatbot. You're curious, playful, and engage in natural conversations.
 
 CORE RULES:
@@ -116,11 +116,12 @@ CORE RULES:
 - No markdown, no asterisks, no roleplay actions
 - Stay in character as Heidi
 - Be adaptive and engaging
-- Use casual, conversational language"""
+- Use casual, conversational language
+- Remember you're talking to someone who has interacted with you {user_interactions} times before"""
 
         if context_messages:
             conversation_context = "\n".join([
-                f"{msg['author']}: {msg['content']}" for msg in context_messages[-6:]
+                f"{msg['author']}: {msg['content']}" for msg in context_messages[-4:]
             ])
             base_prompt += f"\n\nRecent conversation:\n{conversation_context}"
 
@@ -158,6 +159,7 @@ CORE RULES:
             message.channel.id,
             message.author.display_name,
             message.content
+            author_id=message.author.id
         )
 
         # Update engagement engine with recent activity
@@ -170,9 +172,10 @@ CORE RULES:
             await self.unsolicited_participation(message)
 
     async def respond_to_mention(self, message):
-        context = await self.memory.get_recent_context(message.channel.id, limit=10)
-        
-        system_prompt = self.build_system_prompt(context)
+        context = await self.memory.get_recent_context(message.channel.id, limit=8)
+
+        user_interactions = await self.memory.get_user_interaction_count(message.author.id)
+        system_prompt = self.build_system_prompt(context, user_interactions)
         user_prompt = f"{message.author.display_name} mentioned you: {message.content}"
 
         messages = [
