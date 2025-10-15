@@ -1,6 +1,7 @@
 import random
 import json
 import aiosqlite
+import asyncio
 from datetime import datetime
 
 class AdaptivePersonality:
