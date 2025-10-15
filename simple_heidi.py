@@ -101,10 +101,29 @@ class SimpleHeidi(discord.Client):
                 
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
+
+            # Check if the response has the expected structure
+            if "choices" not in data or len(data["choices"]) == 0:
+                log.warning("❌ No choices in OpenRouter response")
+                return None
+
+            choice = data["choices"][0]
+            if "message" not in choice or "content" not in choice["message"]:
+               log.warning("❌ Invalid message structure in response")
+               return None
+
+            content = choice["message"]["content"].strip()
+            if not content:
+                log.warning("❌ Empty content in response")
+                return None
+
+            log.info(f"✅ OpenRouter response: {content}")
+            return content
             
         except Exception as e:
             log.error(f"❌ OpenRouter API error: {e}")
+             if 'response' in locals():
+                 log.error(f"Response text: {response.text}")
             return None
 
     def build_system_prompt(self, context_messages, user_interactions=0, is_unsolicited=False):
