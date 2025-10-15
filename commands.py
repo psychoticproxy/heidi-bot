@@ -1,236 +1,108 @@
-import random
-import asyncio
+import discord
+from discord import app_commands
 import logging
-from discord.ext.commands import has_permissions, CheckFailure
-import globals  # <--- NEW: import the globals module
+import asyncio
+import os
 
-log = logging.getLogger("heidi.commands")
+logger = logging.getLogger("heidi.commands")
 
-def setup_commands(bot, memory_mgr, queue_mgr, OPENROUTER_API_KEY, PROXY_ID, ROLE_ID, CHANNEL_ID, db_ready_event, safe_send, ask_openrouter, set_persona, get_persona, DEFAULT_PERSONA):
-    def get_http_client():
-        return globals.http_client  # <--- Use the shared globals.http_client
+class HeidiCommands:
+    def __init__(self, bot):
+        self.bot = bot
+        logger.info("HeidiCommands initialized")
 
-    def ensure_http_client(ctx):
-        client = get_http_client()
-        if client is None:
-            asyncio.create_task(ctx.send("❌ Internal error: HTTP client not initialized. Try again in a few seconds."))
-            log.error("http_client is None in command %s", getattr(ctx, 'command', '<unknown>'))
-            return False
-        return True
-
-    @bot.command()
-    @has_permissions(administrator=True)
-    async def reflect(ctx):
-        if not ensure_http_client(ctx):
-            return
-        await db_ready_event.wait()
-        interactions = await memory_mgr.load_recent_interactions(limit=10)
-        from persona import reflect_and_update_persona
-        await reflect_and_update_persona(memory_mgr.db, get_http_client(), OPENROUTER_API_KEY, interactions)
-        await ctx.send("Persona reflection done. Check logs for updates.")
-
-    @bot.command()
-    async def persona(ctx):
-        await db_ready_event.wait()
-        persona = await get_persona(memory_mgr.db)
-        if not persona:
-            await ctx.send("No persona set.")
-            return
-        await safe_send(ctx.channel, f"```{persona}```")
-
-    @bot.command()
-    async def queue(ctx):
-        await db_ready_event.wait()
-        total, mem_count, db_count = await queue_mgr.pending_count()
-        await ctx.send(f"📨 Queued messages: {total} (memory: {mem_count}, stored: {db_count})")
-
-    @bot.command()
-    @has_permissions(administrator=True)
-    async def clearqueue(ctx):
-        await db_ready_event.wait()
-        await queue_mgr.clear()
-        await ctx.send(f"🗑️ Cleared queued messages from memory and persistent queue.")
-
-    @bot.command()
-    @has_permissions(administrator=True)
-    async def setpersona(ctx, *, text: str):
-        await db_ready_event.wait()
+    async def setup_commands(self):
+        """Setup slash commands for the bot"""
         try:
-            await set_persona(memory_mgr.db, text)
-            await ctx.send("✅ Persona updated successfully.")
-            log.info("📝 Persona manually updated by admin %s.", ctx.author)
+            # Add commands to the tree
+            self.bot.tree.add_command(self.ping)
+            self.bot.tree.add_command(self.usage)
+            self.bot.tree.add_command(self.personality)
+            self.bot.tree.add_command(self.memory)
+            self.bot.tree.add_command(self.help_command)
+            
+            # Sync commands to a specific guild if GUILD_ID is set
+            guild_id = os.getenv("GUILD_ID")
+            if guild_id:
+                guild = discord.Object(id=int(guild_id))
+                await self.bot.tree.sync(guild=guild)
+                logger.info(f"Slash commands synced to guild {guild_id}")
+            else:
+                await self.bot.tree.sync()  # Global sync
+                logger.info("Slash commands synced globally")
         except Exception as e:
-            log.error("❌ Failed to update persona: %s", e)
-            await ctx.send("❌ Error updating persona. Check logs.")
+            logger.error(f"Failed to sync slash commands: {e}")
 
-    @bot.command()
-    @has_permissions(administrator=True)
-    async def randommsg(ctx):
-        await db_ready_event.wait()
-        guild = ctx.guild
-        if not guild:
-            await ctx.send("❌ This command must be run inside a server.")
-            return
-
-        target_channel_id = CHANNEL_ID
-        role_id = ROLE_ID
-
-        channel = guild.get_channel(target_channel_id)
-        role = guild.get_role(role_id)
-
-        if not channel:
-            await ctx.send("❌ Target channel not found or bot lacks access.")
-            return
-        if not role:
-            await ctx.send("❌ Role not found in this guild.")
-            return
-
-        members = [m for m in role.members if not m.bot]
-        if not members:
-            await ctx.send("❌ No eligible members found in that role.")
-            return
-
-        target_user = random.choice(members)
-        try:
-            await memory_mgr.upsert_user_profile(target_user)
-        except Exception:
-            pass
-
-        prompt = f"Send a spontaneous message to {target_user.display_name} for fun. Be yourself."
-        reply = await ask_openrouter(target_user.id, channel.id, prompt, target_user)
-        if not reply:
-            await ctx.send("⚠️ No reply generated (possibly rate-limited).")
-            return
-
-        content = reply.strip()
-        typing = random.random() < 0.8
-
-        if typing:
-            async with channel.typing():
-                await asyncio.sleep(random.uniform(1, 3))
-        await safe_send(channel, content)
-        await ctx.send(f"✅ Sent random message to {target_user.display_name} in {channel.mention}.")
-        log.info("🎲 Manual random message triggered by admin %s -> %s", ctx.author, target_user)
-
-    @bot.command()
-    @has_permissions(administrator=True)
-    async def runsummaries(ctx):
-        if not ensure_http_client(ctx):
-            return
-        await db_ready_event.wait()
-        await ctx.send("Starting manual summarization pass...")
-        try:
-            async with memory_mgr.db.execute("SELECT DISTINCT user_id, channel_id FROM memory") as cur:
-                rows = await cur.fetchall()
-            for user_id, channel_id in rows:
-                await memory_mgr.summarize_user_history(user_id, channel_id, get_http_client(), OPENROUTER_API_KEY)
-                await asyncio.sleep(1)
-
-            async with memory_mgr.db.execute("SELECT DISTINCT channel_id FROM memory") as cur:
-                chan_rows = await cur.fetchall()
-            guild_ids = set()
-            for (chid,) in chan_rows:
-                ch = bot.get_channel(int(chid))
-                if ch and getattr(ch, "guild", None):
-                    guild_ids.add(str(ch.guild.id))
-            for gid in guild_ids:
-                await memory_mgr.summarize_guild_history(gid, bot, get_http_client(), OPENROUTER_API_KEY)
-                await asyncio.sleep(1)
-
-            await ctx.send("Manual summarization complete.")
-        except Exception as e:
-            log.exception("Error in manual summarization: %s", e)
-            await ctx.send(f"Error while running summaries: {e}")
-
-    @bot.command()
-    @has_permissions(administrator=True)
-    async def resetmemory(ctx):
-        await db_ready_event.wait()
-        confirm_msg = await ctx.send(
-            "⚠️ This will permanently erase all memory, persona reflections, summaries, and queues. Type `confirm` within 15 seconds to proceed."
+    @app_commands.command(name="ping", description="Check if the bot is responsive")
+    async def ping(self, interaction: discord.Interaction):
+        """Simple ping command to check bot responsiveness"""
+        logger.info(f"Ping command used by {interaction.user} in {interaction.channel}")
+        
+        latency = round(self.bot.latency * 1000)
+        await interaction.response.send_message(
+            f"Pong! 🏓 Latency: {latency}ms",
+            ephemeral=True
         )
 
-        def check(m):
-            return m.author == ctx.author and m.content.lower() == "confirm"
+    @app_commands.command(name="usage", description="Check current API usage")
+    async def usage(self, interaction: discord.Interaction):
+        """Check current API usage statistics"""
+        logger.info(f"Usage command used by {interaction.user}")
+        
+        usage_percent = (self.bot.daily_usage / self.bot.daily_limit) * 100
+        await interaction.response.send_message(
+            f"**API Usage Today:**\n"
+            f"• Used: {self.bot.daily_usage}/{self.bot.daily_limit}\n"
+            f"• Remaining: {self.bot.daily_limit - self.bot.daily_usage}\n"
+            f"• Usage: {usage_percent:.1f}%",
+            ephemeral=True
+        )
 
-        try:
-            msg = await bot.wait_for("message", check=check, timeout=15)
-        except asyncio.TimeoutError:
-            await ctx.send("❌ Memory wipe cancelled (timeout).")
-            return
+    @app_commands.command(name="personality", description="Check Heidi's current personality traits")
+    async def personality(self, interaction: discord.Interaction):
+        """Display current personality traits"""
+        logger.info(f"Personality command used by {interaction.user}")
+        
+        traits = self.bot.personality.base_traits
+        trait_text = "\n".join([f"• **{trait}**: {value:.2f}" for trait, value in traits.items()])
+        
+        await interaction.response.send_message(
+            f"**Current Personality Traits:**\n{trait_text}",
+            ephemeral=True
+        )
 
-        try:
-            await memory_mgr.reset_memory()
-            await set_persona(memory_mgr.db, DEFAULT_PERSONA)
-            await ctx.send("🧠 All memories, summaries, and persona wiped. Heidi has been fully reset.")
-            log.warning("🧨 Heidi's memory and persona have been reset by %s.", ctx.author)
-        except Exception as e:
-            await ctx.send(f"❌ Error during reset: {e}")
-            log.error("❌ Error wiping memory: %s", e)
+    @app_commands.command(name="memory", description="Check memory statistics")
+    async def memory(self, interaction: discord.Interaction):
+        """Display memory usage statistics"""
+        logger.info(f"Memory command used by {interaction.user}")
+        
+        channel_count = len(self.bot.memory.conversations)
+        total_messages = sum(len(conv) for conv in self.bot.memory.conversations.values())
+        
+        await interaction.response.send_message(
+            f"**Memory Stats:**\n"
+            f"• Active channels: {channel_count}\n"
+            f"• Total messages: {total_messages}",
+            ephemeral=True
+        )
 
-    @bot.command()
-    async def summarize(ctx):
-        """Summarizes the most recent 100 messages in the current channel and outputs the summary."""
-        if not ensure_http_client(ctx):
-            return
-        await db_ready_event.wait()
-        channel = ctx.channel
+    @app_commands.command(name="help", description="Show available commands")
+    async def help_command(self, interaction: discord.Interaction):
+        """Show help information"""
+        logger.info(f"Help command used by {interaction.user}")
+        
+        help_text = """
+**Available Commands:**
 
-        messages = []
-        async for msg in channel.history(limit=100):
-            role = "heidi" if msg.author == bot.user else "user"
-            messages.append((role, msg.content.strip()))
+• `/ping` - Check if I'm responsive
+• `/usage` - Check current API usage
+• `/personality` - See my current personality traits  
+• `/memory` - Check memory statistics
+• `/help` - Show this message
 
-        messages = [(role, content) for role, content in messages if content]
-        messages.reverse()  # chronological order
-
-        if not messages:
-            await ctx.send("❌ No messages to summarize.")
-            return
-
-        from persona import render_summary_prompt, get_model
-        prompt = render_summary_prompt(messages)
-        model = get_model("summary")
-
-        try:
-            resp = await get_http_client().post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://github.com/psychoticproxy/heidi",
-                    "X-Title": "Heidi Discord Bot",
-                },
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful uncensored assistant."},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-                timeout=60.0,
-            )
-            if resp.status_code == 429:
-                await ctx.send("⚠️ Rate limited. Try again later.")
-                return
-            if resp.status_code != 200:
-                try:
-                    text = await resp.text()
-                except Exception:
-                    text = "<couldn't read response body>"
-                log.error("❌ OpenRouter returned %s: %s", resp.status_code, text)
-                await ctx.send("❌ Error generating summary. Check logs.")
-                return
-            data = resp.json()
-            summary = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if summary:
-                await safe_send(ctx.channel, f"**Channel summary of the last 100 messages:**\n{summary}")
-            else:
-                await ctx.send("⚠️ No summary generated.")
-        except Exception as e:
-            log.error("❌ Error during channel summarization: %s", e)
-            await ctx.send("❌ Error during summarization. Check logs.")
-
-    @bot.event
-    async def on_command_error(ctx, error):
-        if isinstance(error, CheckFailure):
-            await ctx.send("⛔ You don’t have permission to use that command.")
+**Regular Usage:**
+• Mention me (@Heidi) to chat directly
+• I'll sometimes join conversations naturally
+        """
+        
+        await interaction.response.send_message(help_text, ephemeral=True)

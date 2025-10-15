@@ -1,5 +1,5 @@
 discord.py
 aiosqlite
 flask
-httpx
 python-dotenv
+httpx
