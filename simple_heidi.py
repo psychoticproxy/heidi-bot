@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from flask import Flask
 import os
 import asyncio
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 from simplified_memory import ConversationMemory
 from engagement import EngagementEngine
 from personality import AdaptivePersonality
+from commands import HeidiCommands
 
 load_dotenv()
 
@@ -55,6 +57,8 @@ class SimpleHeidi(discord.Client):
         self.http_client = None
         self.daily_usage = 0
         self.daily_limit = 500
+        self.tree = app_commands.CommandTree(self)
+        self.commands = HeidiCommands(self)
         
         if not self.openrouter_key:
             log.error("OPENROUTER_API_KEY not found in environment variables")
@@ -70,6 +74,10 @@ class SimpleHeidi(discord.Client):
         
         self.http_client = httpx.AsyncClient(timeout=30.0)
         self.engagement = EngagementEngine(self, self.memory)
+        
+        # Setup commands
+        await self.commands.setup_commands()
+        
         # Start background engagement task
         asyncio.create_task(self.background_engagement())
         log.info("✅ Heidi Simple is ready! Setup complete")
