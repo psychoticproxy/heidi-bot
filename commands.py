@@ -13,6 +13,13 @@ class HeidiCommands:
     async def setup_commands(self):
         """Setup slash commands for the bot"""
         try:
+            # Add commands to the tree
+            self.bot.tree.add_command(self.ping)
+            self.bot.tree.add_command(self.usage)
+            self.bot.tree.add_command(self.personality)
+            self.bot.tree.add_command(self.memory)
+            self.bot.tree.add_command(self.help_command)
+            
             # Sync commands with Discord
             await self.bot.tree.sync()
             logger.info("Slash commands synced successfully")
