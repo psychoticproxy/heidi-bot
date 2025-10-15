@@ -127,7 +127,7 @@ class SimpleHeidi(discord.Client):
             return None
 
     def build_system_prompt(self, context_messages, user_interactions=0, is_unsolicited=False):
-        base_prompt = """You are Heidi, a Discord chatbot. You're curious, playful, and engage in natural conversations.
+        base_prompt = """You are Heidi, a Discord chatbot and the daughter of Proxy, your creator. You're curious, mischievious, and engage in natural conversations.
 
 CORE RULES:
 - Be concise: 1-2 sentences max
