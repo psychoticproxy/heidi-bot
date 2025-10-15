@@ -18,6 +18,7 @@ class ConversationMemory:
             CREATE TABLE IF NOT EXISTS conversations (
                 channel_id TEXT,
                 author TEXT,
+                author_id TEXT,
                 content TEXT,
                 is_bot BOOLEAN,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
