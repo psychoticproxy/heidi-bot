@@ -122,8 +122,8 @@ class SimpleHeidi(discord.Client):
             
         except Exception as e:
             log.error(f"❌ OpenRouter API error: {e}")
-             if 'response' in locals():
-                 log.error(f"Response text: {response.text}")
+            if 'response' in locals():
+                log.error(f"Response text: {response.text}")
             return None
 
     def build_system_prompt(self, context_messages, user_interactions=0, is_unsolicited=False):
