@@ -112,4 +112,12 @@ class ConversationMemory:
             self.conversations[channel_id].extend(messages)
             return messages
         return []
-
+        
+    async def cleanup_old_messages(self, days_old=7):
+        """Clean up old messages to prevent database bloat"""
+        if self.db:
+            await self.db.execute(
+                "DELETE FROM conversations WHERE timestamp < datetime('now', ?)",
+                (f'-{days_old} days',)
+            )
+            await self.db.commit()
