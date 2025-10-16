@@ -15,7 +15,7 @@ class EngagementEngine:
         last_active = self.last_activity.get(channel_id, 0)
         current_time = asyncio.get_event_loop().time()
         time_since_active = current_time - last_active
-        should_engage = time_since_active < 7200
+        should_engage = time_since_active < 43200
         logger.debug(f"Channel {channel_id} - Time since last activity: {time_since_active:.1f}s, Should engage: {should_engage}")
         return should_engage
         
