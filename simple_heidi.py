@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from simplified_memory import ConversationMemory
 from engagement import EngagementEngine
 from personality import LLMManagedPersonality
+from personality_db import PersonalityDB
 from commands import setup_legacy_commands
 
 load_dotenv()
@@ -50,7 +51,8 @@ class SimpleHeidi(commands.Bot):
         
         log.info("Initializing SimpleHeidi bot components")
         self.memory = ConversationMemory()
-        self.personality = LLMManagedPersonality()
+        self.personality_db = PersonalityDB()
+        self.personality = LLMManagedPersonality(self.personality_db)
         self.engagement = None
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
         self.http_client = None
@@ -67,6 +69,7 @@ class SimpleHeidi(commands.Bot):
     async def setup_hook(self):
         log.info("Starting bot setup hook")
         await self.memory.init()
+        await self.personality_db.init()
         self.http_client = httpx.AsyncClient(timeout=30.0)
         self.engagement = EngagementEngine(self, self.memory)
         asyncio.create_task(self.background_engagement())
@@ -80,6 +83,8 @@ class SimpleHeidi(commands.Bot):
         if hasattr(self.memory, 'db') and self.memory.db:
             await self.memory.db.close()
             log.info("Memory database closed")
+        await self.personality_db.close()
+        log.info("Personality database closed")
         await super().close()
         log.info("Bot shutdown complete")
 
@@ -145,12 +150,13 @@ class SimpleHeidi(commands.Bot):
                 log.error(f"Response text: {response.text}")
             return None
 
-    def build_system_prompt(self, context_messages, user_interactions=0, personality_summary=None, is_unsolicited=False):
-        log.debug(f"Building system prompt: user_interactions={user_interactions}, personality_summary={personality_summary}, is_unsolicited={is_unsolicited}, context_messages={len(context_messages)}")
+    async def build_system_prompt(self, context_messages, user_interactions=0, personality_summary=None, is_unsolicited=False):
+        log.debug(f"Building system prompt: user_interactions={user_interactions}, is_unsolicited={is_unsolicited}, context_messages={len(context_messages)}")
+        personality_summary = personality_summary or await self.personality.get_personality_summary()
         base_prompt = (
             f"You are Heidi, a Discord chatbot and the daughter of Proxy, your creator. "
             f"You're curious, mischievous, and engage in natural conversations.\n"
-            f"Current Personality Summary: {personality_summary or self.personality.get_personality_summary()}\n"
+            f"Current Personality Summary: {personality_summary}\n"
             "CORE RULES:\n"
             "- Be concise: 1-2 sentences max\n"
             "- Sound like a real person in a Discord chat\n"
@@ -231,111 +237,151 @@ class SimpleHeidi(commands.Bot):
         log.debug(f"📝 Context for {message.channel.id}: {len(context)} messages")
         user_interactions = await self.memory.get_user_interaction_count(message.author.id)
         log.debug(f"User {message.author} has {user_interactions} previous interactions")
-        system_prompt = self.build_system_prompt(
+        
+        # Step 1: Get natural response
+        system_prompt = await self.build_system_prompt(
             context, user_interactions,
-            personality_summary=self.personality.get_personality_summary()
+            personality_summary=await self.personality.get_personality_summary()
         )
-        user_prompt = (
-            f"{message.author.display_name} mentioned you: {message.content}\n"
-            "After replying, analyze this interaction and update Heidi's personality summary to be more engaging, entertaining, natural, and sincere with emotions. "
-            "Return your reply as 'reply', and the updated personality summary as 'personality_summary' in JSON."
-        )
+        
+        user_prompt = f"{message.author.display_name} mentioned you: {message.content}"
+        
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
+        
         temperature = self.personality.get_temperature_setting()
         log.debug(f"Using temperature setting: {temperature}")
         response = await self.call_openrouter(messages, temperature=temperature)
+        
         if response:
             log.info(f"Replying to mention with: '{response}'")
-            try:
-                import json
-                data = json.loads(response)
-                reply = data.get("reply", "").strip()
-                summary = data.get("personality_summary", "").strip()
-                if summary:
-                    self.personality.update_from_llm(summary)
-                async with message.channel.typing():
-                    typing_delay = random.uniform(1, 3)
-                    log.debug(f"Typing delay: {typing_delay:.1f}s")
-                    await asyncio.sleep(typing_delay)
-                await message.reply(reply or response, mention_author=False)
-                await self.memory.add_message(
-                    message.channel.id, "Heidi", reply or response, True
-                )
-            except Exception:
-                # Fallback: treat as flat text reply
-                async with message.channel.typing():
-                    typing_delay = random.uniform(1, 3)
-                    log.debug(f"Typing delay: {typing_delay:.1f}s")
-                    await asyncio.sleep(typing_delay)
-                await message.reply(response, mention_author=False)
-                await self.memory.add_message(
-                    message.channel.id, "Heidi", response, True
-                )
-        else:
-            log.warning("OpenRouter returned no response, using fallback")
-            fallback_responses = [
-                "https://tenor.com/view/bocchi-bocchi-the-rock-non-linear-gif-27023528",
-                "https://tenor.com/view/bocchi-the-rock-bocchi-roll-rolling-rolling-on-the-floor-gif-4645200487976536632",
-                "https://tenor.com/view/anime-fran-sleep-sleepy-tired-gif-8633431630979404250"
-            ]
-            response = random.choice(fallback_responses)
+            
+            # Send response immediately
+            async with message.channel.typing():
+                typing_delay = random.uniform(1, 3)
+                log.debug(f"Typing delay: {typing_delay:.1f}s")
+                await asyncio.sleep(typing_delay)
+            
             await message.reply(response, mention_author=False)
-            log.info(f"Sent fallback response: {response}")
+            await self.memory.add_message(
+                message.channel.id, "Heidi", response, True
+            )
+            
+            # Step 2: Update personality in background (fire and forget)
+            asyncio.create_task(self.update_personality_based_on_interaction(
+                context, message, response
+            ))
+        else:
+            await self.send_fallback_response(message)
+
+    async def send_fallback_response(self, message):
+        """Send fallback response when API fails"""
+        log.warning("OpenRouter returned no response, using fallback")
+        fallback_responses = [
+            "https://tenor.com/view/bocchi-bocchi-the-rock-non-linear-gif-27023528",
+            "https://tenor.com/view/bocchi-the-rock-bocchi-roll-rolling-rolling-on-the-floor-gif-4645200487976536632",
+            "https://tenor.com/view/anime-fran-sleep-sleepy-tired-gif-8633431630979404250"
+        ]
+        response = random.choice(fallback_responses)
+        await message.reply(response, mention_author=False)
+        log.info(f"Sent fallback response: {response}")
+
+    async def update_personality_based_on_interaction(self, context, message, bot_response):
+        """Update personality based on the interaction in background"""
+        try:
+            personality_prompt = (
+                f"Based on this interaction, update Heidi's personality summary to be more engaging and natural.\n"
+                f"User: {message.author.display_name}\n"
+                f"Message: {message.content}\n"
+                f"Heidi's response: {bot_response}\n"
+                f"Current personality: {await self.personality.get_personality_summary()}\n\n"
+                f"Provide ONLY the updated personality summary as a brief comma-separated list of traits. "
+                f"Keep it concise (max 100 characters)."
+            )
+            
+            messages = [
+                {"role": "system", "content": "You are a personality analyzer. Provide only the updated personality summary."},
+                {"role": "user", "content": personality_prompt}
+            ]
+            
+            new_summary = await self.call_openrouter(messages, temperature=0.3)  # Lower temp for consistency
+            if new_summary and len(new_summary.strip()) > 10:
+                await self.personality.update_from_llm(new_summary.strip())
+                log.info(f"✅ Personality updated: {new_summary}")
+                
+        except Exception as e:
+            log.error(f"Failed to update personality: {e}")
 
     async def unsolicited_participation(self, message):
         log.debug(f"Checking unsolicited participation in channel {message.channel.id}")
         context = await self.memory.get_recent_context(message.channel.id, limit=8)
         if len(context) >= 3 and await self.engagement.should_engage(message.channel.id):
             log.info(f"Attempting unsolicited participation with {len(context)} context messages")
-            system_prompt = self.build_system_prompt(
+            
+            # Step 1: Get natural response
+            system_prompt = await self.build_system_prompt(
                 context,
-                personality_summary=self.personality.get_personality_summary(),
+                personality_summary=await self.personality.get_personality_summary(),
                 is_unsolicited=True
             )
-            user_prompt = (
-                "Join this conversation naturally with a relevant comment or question. Be brief and engaging. "
-                "After replying, analyze this interaction and update Heidi's personality summary to be more engaging, entertaining, natural, and sincere with emotions. "
-                "Return your reply as 'reply', and the updated personality summary as 'personality_summary' in JSON."
-            )
+            
+            user_prompt = "Join this conversation naturally with a relevant comment or question. Be brief and engaging."
+            
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
+            
             temperature = self.personality.get_temperature_setting()
             response = await self.call_openrouter(messages, temperature=temperature)
+            
             if response:
                 log.info(f"Sending unsolicited message: '{response}'")
-                try:
-                    import json
-                    data = json.loads(response)
-                    reply = data.get("reply", "").strip()
-                    summary = data.get("personality_summary", "").strip()
-                    if summary:
-                        self.personality.update_from_llm(summary)
-                    async with message.channel.typing():
-                        typing_delay = random.uniform(2, 4)
-                        log.debug(f"Typing delay: {typing_delay:.1f}s")
-                        await asyncio.sleep(typing_delay)
-                    await message.channel.send(reply or response)
-                    await self.memory.add_message(
-                        message.channel.id, "Heidi", reply or response, True
-                    )
-                except Exception:
-                    async with message.channel.typing():
-                        typing_delay = random.uniform(2, 4)
-                        log.debug(f"Typing delay: {typing_delay:.1f}s")
-                        await asyncio.sleep(typing_delay)
-                    await message.channel.send(response)
-                    await self.memory.add_message(
-                        message.channel.id, "Heidi", response, True
-                    )
+                
+                # Send response
+                async with message.channel.typing():
+                    typing_delay = random.uniform(2, 4)
+                    log.debug(f"Typing delay: {typing_delay:.1f}s")
+                    await asyncio.sleep(typing_delay)
+                
+                await message.channel.send(response)
+                await self.memory.add_message(
+                    message.channel.id, "Heidi", response, True
+                )
+                
+                # Step 2: Update personality in background
+                asyncio.create_task(self.update_personality_from_spontaneous(
+                    context, response
+                ))
             else:
                 log.debug("No response from OpenRouter for unsolicited participation")
         else:
             log.debug(f"Unsolicited participation skipped: context={len(context)}, should_engage={await self.engagement.should_engage(message.channel.id)}")
+
+    async def update_personality_from_spontaneous(self, context, response):
+        """Update personality based on spontaneous interaction"""
+        try:
+            personality_prompt = (
+                f"Based on Heidi's spontaneous message: '{response}'\n"
+                f"and the conversation context, update her personality summary.\n"
+                f"Current: {await self.personality.get_personality_summary()}\n\n"
+                f"Provide ONLY the updated personality summary as a brief comma-separated list."
+            )
+            
+            messages = [
+                {"role": "system", "content": "Update personality based on spontaneous interaction."},
+                {"role": "user", "content": personality_prompt}
+            ]
+            
+            new_summary = await self.call_openrouter(messages, temperature=0.3)
+            if new_summary and len(new_summary.strip()) > 10:
+                await self.personality.update_from_llm(new_summary.strip())
+                log.info(f"✅ Personality updated from spontaneous: {new_summary}")
+                
+        except Exception as e:
+            log.error(f"Failed to update personality from spontaneous: {e}")
 
 if __name__ == "__main__":
     token = os.getenv("DISCORD_BOT_TOKEN")
