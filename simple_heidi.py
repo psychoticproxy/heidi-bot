@@ -332,7 +332,7 @@ class SimpleHeidi(commands.Bot):
                 {"role": "user", "content": personality_prompt}
             ]
             
-            new_summary = await self.call_openrouter(messages, temperature=0.3)  # Lower temp for consistency
+            new_summary = await self.call_openrouter(messages, temperature=1.0)  # Lower temp for consistency
             if new_summary and len(new_summary.strip()) > 10:
                 await self.personality.update_from_llm(new_summary.strip())
                 log.info(f"✅ Personality updated: {new_summary}")
@@ -401,7 +401,7 @@ class SimpleHeidi(commands.Bot):
                 {"role": "user", "content": personality_prompt}
             ]
             
-            new_summary = await self.call_openrouter(messages, temperature=0.3)
+            new_summary = await self.call_openrouter(messages, temperature=1.0)
             if new_summary and len(new_summary.strip()) > 10:
                 await self.personality.update_from_llm(new_summary.strip())
                 log.info(f"✅ Personality updated from spontaneous: {new_summary}")
