@@ -10,7 +10,7 @@ import threading
 from dotenv import load_dotenv
 from simplified_memory import ConversationMemory
 from engagement import EngagementEngine
-from personality import AdaptivePersonality
+from personality import LLMManagedPersonality
 from commands import setup_legacy_commands
 
 load_dotenv()
