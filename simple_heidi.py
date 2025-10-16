@@ -106,8 +106,8 @@ class SimpleHeidi(commands.Bot):
             log.debug(f"API usage: {self.daily_usage}/{self.daily_limit}")
         return can_request
 
-    async def call_openrouter(self, messages, temperature=0.8):
-        log.info(f"Calling OpenRouter API with temperature {temperature}")
+    async def call_openrouter(self, messages, temperature=0.8, max_tokens=1000):
+        log.info(f"Calling OpenRouter API with temperature {temperature}, max_tokens {max_tokens}")
         if not await self.can_make_request():
             log.warning("⚠️ Daily API limit reached, skipping request")
             return None
@@ -125,7 +125,7 @@ class SimpleHeidi(commands.Bot):
                     "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": 1000,
+                    "max_tokens": max_tokens,
                 },
             )
             if response.status_code == 429:
