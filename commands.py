@@ -28,7 +28,7 @@ def setup_legacy_commands(bot):
     async def personality(ctx):
         """Display current personality summary."""
         logger.info(f"Personality command used by {ctx.author}")
-        summary = bot.personality.get_personality_summary()
+        summary = await bot.personality.get_personality_summary()
         await ctx.send(
             f"**Current Personality Summary:**\n{summary}"
         )
@@ -43,4 +43,40 @@ def setup_legacy_commands(bot):
             f"**Memory Stats:**\n"
             f"• Active channels: {channel_count}\n"
             f"• Total messages: {total_messages}"
+        )
+
+    @bot.command(name="temperature")
+    async def temperature(ctx):
+        """Display current temperature setting and pattern info."""
+        logger.info(f"Temperature command used by {ctx.author}")
+        temp_info = bot.personality.get_temperature_info()
+        current_temp = temp_info["current_temperature"]
+        hour_index = temp_info["current_hour_index"]
+        next_temp = temp_info["next_temperature"]
+        
+        # Create a simple visual representation of the temperature pattern
+        pattern_display = []
+        for i, temp in enumerate(temp_info["full_pattern"]):
+            marker = "🟢" if i == hour_index else "⚪"
+            pattern_display.append(f"{marker} {i:02d}:00 - {temp:.2f}")
+        
+        # Show current segment and next few hours
+        current_segment = "\n".join(pattern_display[hour_index:hour_index+4])
+        
+        await ctx.send(
+            f"**Temperature Settings:**\n"
+            f"• Current: **{current_temp:.2f}** (Hour {hour_index}:00)\n"
+            f"• Next: {next_temp:.2f} (Hour {(hour_index + 1) % 24}:00)\n\n"
+            f"**Next Hours:**\n{current_segment}"
+        )
+
+    @bot.command(name="resettemp")
+    @commands.has_permissions(administrator=True)
+    async def reset_temp(ctx):
+        """Reset the temperature pattern (Admin only)."""
+        logger.info(f"Reset temperature command used by {ctx.author}")
+        new_pattern = ctx.bot.personality.reset_temperature_pattern()
+        await ctx.send(
+            f"✅ Temperature pattern reset!\n"
+            f"New pattern: {new_pattern}"
         )
