@@ -50,7 +50,7 @@ class SimpleHeidi(commands.Bot):
         
         log.info("Initializing SimpleHeidi bot components")
         self.memory = ConversationMemory()
-        self.personality = AdaptivePersonality()
+        self.personality = LLMManagedPersonality()
         self.engagement = None
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
         self.http_client = None
@@ -67,7 +67,6 @@ class SimpleHeidi(commands.Bot):
     async def setup_hook(self):
         log.info("Starting bot setup hook")
         await self.memory.init()
-        await self.personality.init()
         self.http_client = httpx.AsyncClient(timeout=30.0)
         self.engagement = EngagementEngine(self, self.memory)
         asyncio.create_task(self.background_engagement())
@@ -81,9 +80,6 @@ class SimpleHeidi(commands.Bot):
         if hasattr(self.memory, 'db') and self.memory.db:
             await self.memory.db.close()
             log.info("Memory database closed")
-        if hasattr(self.personality, 'db') and self.personality.db:
-            await self.personality.db.close()
-            log.info("Personality database closed")
         await super().close()
         log.info("Bot shutdown complete")
 
@@ -149,18 +145,21 @@ class SimpleHeidi(commands.Bot):
                 log.error(f"Response text: {response.text}")
             return None
 
-    def build_system_prompt(self, context_messages, user_interactions=0, is_unsolicited=False):
-        log.debug(f"Building system prompt: user_interactions={user_interactions}, is_unsolicited={is_unsolicited}, context_messages={len(context_messages)}")
-        base_prompt = """You are Heidi, a Discord chatbot and the daughter of Proxy, your creator. You're curious, mischievious, and engage in natural conversations.
-
-CORE RULES:
-- Be concise: 1-2 sentences max
-- Sound like a real person in a Discord chat
-- No markdown, no asterisks, no roleplay actions
-- Stay in character as Heidi
-- Be adaptive and engaging
-- Use casual, conversational language
-- Remember you're talking to someone who has interacted with you {user_interactions} times before"""
+    def build_system_prompt(self, context_messages, user_interactions=0, personality_summary=None, is_unsolicited=False):
+        log.debug(f"Building system prompt: user_interactions={user_interactions}, personality_summary={personality_summary}, is_unsolicited={is_unsolicited}, context_messages={len(context_messages)}")
+        base_prompt = (
+            f"You are Heidi, a Discord chatbot and the daughter of Proxy, your creator. "
+            f"You're curious, mischievous, and engage in natural conversations.\n"
+            f"Current Personality Summary: {personality_summary or self.personality.get_personality_summary()}\n"
+            "CORE RULES:\n"
+            "- Be concise: 1-2 sentences max\n"
+            "- Sound like a real person in a Discord chat\n"
+            "- No markdown, no asterisks, no roleplay actions\n"
+            "- Stay in character as Heidi\n"
+            "- Be adaptive and engaging\n"
+            "- Use casual, conversational language\n"
+            f"- Remember you're talking to someone who has interacted with you {user_interactions} times before"
+        )
         if context_messages:
             conversation_context = "\n".join([
                 f"{msg['author']}: {msg['content']}" for msg in context_messages[-4:]
@@ -232,8 +231,15 @@ CORE RULES:
         log.debug(f"📝 Context for {message.channel.id}: {len(context)} messages")
         user_interactions = await self.memory.get_user_interaction_count(message.author.id)
         log.debug(f"User {message.author} has {user_interactions} previous interactions")
-        system_prompt = self.build_system_prompt(context, user_interactions)
-        user_prompt = f"{message.author.display_name} mentioned you: {message.content}"
+        system_prompt = self.build_system_prompt(
+            context, user_interactions,
+            personality_summary=self.personality.get_personality_summary()
+        )
+        user_prompt = (
+            f"{message.author.display_name} mentioned you: {message.content}\n"
+            "After replying, analyze this interaction and update Heidi's personality summary to be more engaging, entertaining, natural, and sincere with emotions. "
+            "Return your reply as 'reply', and the updated personality summary as 'personality_summary' in JSON."
+        )
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -243,16 +249,31 @@ CORE RULES:
         response = await self.call_openrouter(messages, temperature=temperature)
         if response:
             log.info(f"Replying to mention with: '{response}'")
-            async with message.channel.typing():
-                typing_delay = random.uniform(1, 3)
-                log.debug(f"Typing delay: {typing_delay:.1f}s")
-                await asyncio.sleep(typing_delay)
-            await message.reply(response, mention_author=False)
-            await self.memory.add_message(
-                message.channel.id, "Heidi", response, True
-            )
-            self.personality.adapt_from_interaction(message.content, True)
-            log.debug("Personality adapted from successful mention response")
+            try:
+                import json
+                data = json.loads(response)
+                reply = data.get("reply", "").strip()
+                summary = data.get("personality_summary", "").strip()
+                if summary:
+                    self.personality.update_from_llm(summary)
+                async with message.channel.typing():
+                    typing_delay = random.uniform(1, 3)
+                    log.debug(f"Typing delay: {typing_delay:.1f}s")
+                    await asyncio.sleep(typing_delay)
+                await message.reply(reply or response, mention_author=False)
+                await self.memory.add_message(
+                    message.channel.id, "Heidi", reply or response, True
+                )
+            except Exception:
+                # Fallback: treat as flat text reply
+                async with message.channel.typing():
+                    typing_delay = random.uniform(1, 3)
+                    log.debug(f"Typing delay: {typing_delay:.1f}s")
+                    await asyncio.sleep(typing_delay)
+                await message.reply(response, mention_author=False)
+                await self.memory.add_message(
+                    message.channel.id, "Heidi", response, True
+                )
         else:
             log.warning("OpenRouter returned no response, using fallback")
             fallback_responses = [
@@ -269,8 +290,16 @@ CORE RULES:
         context = await self.memory.get_recent_context(message.channel.id, limit=8)
         if len(context) >= 3 and await self.engagement.should_engage(message.channel.id):
             log.info(f"Attempting unsolicited participation with {len(context)} context messages")
-            system_prompt = self.build_system_prompt(context, is_unsolicited=True)
-            user_prompt = "Join this conversation naturally with a relevant comment or question. Be brief and engaging."
+            system_prompt = self.build_system_prompt(
+                context,
+                personality_summary=self.personality.get_personality_summary(),
+                is_unsolicited=True
+            )
+            user_prompt = (
+                "Join this conversation naturally with a relevant comment or question. Be brief and engaging. "
+                "After replying, analyze this interaction and update Heidi's personality summary to be more engaging, entertaining, natural, and sincere with emotions. "
+                "Return your reply as 'reply', and the updated personality summary as 'personality_summary' in JSON."
+            )
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -279,16 +308,30 @@ CORE RULES:
             response = await self.call_openrouter(messages, temperature=temperature)
             if response:
                 log.info(f"Sending unsolicited message: '{response}'")
-                async with message.channel.typing():
-                    typing_delay = random.uniform(2, 4)
-                    log.debug(f"Typing delay: {typing_delay:.1f}s")
-                    await asyncio.sleep(typing_delay)
-                await message.channel.send(response)
-                await self.memory.add_message(
-                    message.channel.id, "Heidi", response, True
-                )
-                self.personality.adapt_from_interaction(context[-1]['content'], True)
-                log.debug("Personality adapted from successful unsolicited participation")
+                try:
+                    import json
+                    data = json.loads(response)
+                    reply = data.get("reply", "").strip()
+                    summary = data.get("personality_summary", "").strip()
+                    if summary:
+                        self.personality.update_from_llm(summary)
+                    async with message.channel.typing():
+                        typing_delay = random.uniform(2, 4)
+                        log.debug(f"Typing delay: {typing_delay:.1f}s")
+                        await asyncio.sleep(typing_delay)
+                    await message.channel.send(reply or response)
+                    await self.memory.add_message(
+                        message.channel.id, "Heidi", reply or response, True
+                    )
+                except Exception:
+                    async with message.channel.typing():
+                        typing_delay = random.uniform(2, 4)
+                        log.debug(f"Typing delay: {typing_delay:.1f}s")
+                        await asyncio.sleep(typing_delay)
+                    await message.channel.send(response)
+                    await self.memory.add_message(
+                        message.channel.id, "Heidi", response, True
+                    )
             else:
                 log.debug("No response from OpenRouter for unsolicited participation")
         else:
