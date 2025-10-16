@@ -80,3 +80,79 @@ def setup_legacy_commands(bot):
             f"✅ Temperature pattern reset!\n"
             f"New pattern: {new_pattern}"
         )
+
+    @bot.command(name="summarize")
+    async def summarize(ctx, limit: int = 100):
+        """
+        Summarize recent messages in this channel.
+        
+        Usage: !summarize [limit]
+        - limit: Number of messages to summarize (default: 100, max: 500)
+        """
+        logger.info(f"Summarize command used by {ctx.author} in {ctx.channel}")
+        
+        # Validate limit
+        if limit <= 0:
+            await ctx.send("❌ Please specify a positive number of messages to summarize.")
+            return
+        if limit > 500:
+            await ctx.send("⚠️ Limit too high! Using maximum of 500 messages.")
+            limit = 500
+        
+        async with ctx.typing():
+            try:
+                # Fetch message history
+                messages = []
+                async for message in ctx.channel.history(limit=limit + 1):  # +1 to exclude the command itself
+                    if message.id == ctx.message.id:
+                        continue  # Skip the summarize command message
+                    if message.content.startswith('!'):
+                        continue  # Skip other command messages
+                    
+                    # Format message with author and content
+                    author_name = message.author.display_name
+                    content = message.content.replace('\n', ' ')  # Clean up newlines
+                    messages.append(f"{author_name}: {content}")
+                
+                if not messages:
+                    await ctx.send("🤷 No recent messages found to summarize.")
+                    return
+                
+                # Reverse to get chronological order (newest first in history)
+                messages.reverse()
+                conversation_text = "\n".join(messages[-limit:])  # Ensure we don't exceed limit
+                
+                # Prepare prompts for summarization
+                system_prompt = (
+                    "You are Heidi, a Discord chatbot. Your task is to summarize the recent conversation in this channel. "
+                    "Provide a concise, engaging summary that captures the main topics, key points, and any interesting discussions. "
+                    "Keep it natural and conversational, as if you're briefly catching someone up on what they missed. "
+                    "Aim for 2-4 sentences maximum, and maintain your playful personality."
+                )
+                
+                user_prompt = f"Here are the recent messages from this channel. Please summarize them:\n\n{conversation_text}"
+                
+                api_messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                
+                # Call OpenRouter API with lower temperature for more consistent summarization
+                summary = await bot.call_openrouter(api_messages, temperature=0.3, max_tokens=200)
+                
+                if summary:
+                    # Add some context about the summary
+                    message_count = len(messages)
+                    await ctx.send(
+                        f"**📝 Summary of recent conversation** ({message_count} messages):\n"
+                        f"{summary}"
+                    )
+                    logger.info(f"Successfully summarized {message_count} messages in {ctx.channel}")
+                else:
+                    await ctx.send("❌ Sorry, I couldn't generate a summary right now. The API might be unavailable or I've hit my daily limit.")
+                    
+            except discord.Forbidden:
+                await ctx.send("❌ I don't have permission to read message history in this channel.")
+            except Exception as e:
+                logger.error(f"Error in summarize command: {e}")
+                await ctx.send("❌ An error occurred while trying to summarize messages. Please try again later.")
