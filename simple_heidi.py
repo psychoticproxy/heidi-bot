@@ -125,7 +125,7 @@ class SimpleHeidi(commands.Bot):
                     "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": 150,
+                    "max_tokens": 1000,
                 },
             )
             if response.status_code == 429:
