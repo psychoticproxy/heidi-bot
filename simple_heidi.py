@@ -7,6 +7,7 @@ import random
 import logging
 import httpx
 import threading
+import datetime  # Added for date handling
 from dotenv import load_dotenv
 from simplified_memory import ConversationMemory
 from engagement import EngagementEngine
@@ -58,6 +59,7 @@ class SimpleHeidi(commands.Bot):
         self.http_client = None
         self.daily_usage = 0
         self.daily_limit = 500
+        self.last_reset_date = datetime.date.today()  # Added for daily reset
         
         if not self.openrouter_key:
             log.error("OPENROUTER_API_KEY not found in environment variables")
@@ -89,12 +91,19 @@ class SimpleHeidi(commands.Bot):
         log.info("Bot shutdown complete")
 
     async def can_make_request(self):
+        """Check if we can make an API request, with daily reset handling"""
+        current_date = datetime.date.today()
+        if current_date != self.last_reset_date:
+            # New day, reset usage
+            self.daily_usage = 0
+            self.last_reset_date = current_date
+            log.info(f"🔄 Reset daily API usage to 0 for new day: {current_date}")
+        
         can_request = self.daily_usage < self.daily_limit
-        if can_request:
-            self.daily_usage += 1
-            log.debug(f"API request #{self.daily_usage}/{self.daily_limit}")
-        else:
+        if not can_request:
             log.warning(f"⚠️ Daily API limit reached: {self.daily_usage}/{self.daily_limit}")
+        else:
+            log.debug(f"API usage: {self.daily_usage}/{self.daily_limit}")
         return can_request
 
     async def call_openrouter(self, messages, temperature=0.8):
@@ -136,7 +145,10 @@ class SimpleHeidi(commands.Bot):
             if not content:
                 log.warning("❌ Empty content in response")
                 return None
-            log.info(f"✅ OpenRouter response received: '{content}'")
+            
+            # Only increment usage after successful response
+            self.daily_usage += 1
+            log.info(f"✅ OpenRouter response received (Usage: {self.daily_usage}/{self.daily_limit}): '{content}'")
             return content
         except httpx.TimeoutException:
             log.error("❌ OpenRouter API timeout")
