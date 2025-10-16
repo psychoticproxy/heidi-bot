@@ -44,21 +44,3 @@ def setup_legacy_commands(bot):
             f"• Active channels: {channel_count}\n"
             f"• Total messages: {total_messages}"
         )
-
-    @bot.command(name="help")
-    async def help_command(ctx):
-        """Show help information."""
-        logger.info(f"Help command used by {ctx.author}")
-        help_text = """
-**Available Commands:**
-• `!ping` - Check if I'm responsive
-• `!usage` - Check current API usage
-• `!personality` - See my current personality summary
-• `!memory` - Check memory statistics
-• `!help` - Show this message
-
-**Regular Usage:**
-• Mention me (@Heidi) to chat directly
-• I'll sometimes join conversations naturally
-        """
-        await ctx.send(help_text)
