@@ -198,24 +198,40 @@ class SimpleHeidi(commands.Bot):
             await self.try_spontaneous_engagement()
 
     async def try_spontaneous_engagement(self):
-        log.debug("Attempting spontaneous engagement")
-        engaged_channels = 0
-        for guild in self.guilds:
-            for channel in guild.text_channels:
-                if channel.permissions_for(guild.me).send_messages:
-                    message = await self.engagement.spontaneous_message(channel)
-                    if message and random.random() < 0.3:
-                        try:
-                            await channel.send(message)
-                            await self.memory.add_message(
-                                channel.id, "Heidi", message, True
-                            )
-                            log.info(f"💬 Spontaneous message sent in {channel.name} ({channel.id}): '{message}'")
-                            engaged_channels += 1
-                        except discord.Forbidden:
-                            log.warning(f"Missing permissions to send message in {channel.name}")
-                        except Exception as e:
-                            log.error(f"Failed to send spontaneous message in {channel.name}: {e}")
+    log.debug("Attempting spontaneous engagement")
+    eligible_channels = []
+    for guild in self.guilds:
+        for channel in guild.text_channels:
+            if channel.permissions_for(guild.me).send_messages:
+                if await self.engagement.should_engage(channel.id):
+                    eligible_channels.append(channel)
+    
+    if not eligible_channels:
+        log.debug("No eligible channels for spontaneous engagement")
+        return
+    
+    # Select one random channel from the eligible list
+    channel = random.choice(eligible_channels)
+    log.debug(f"Selected channel for spontaneous engagement: {channel.name} ({channel.id})")
+    
+    # Generate the spontaneous message (this makes an API call)
+    message = await self.engagement.spontaneous_message(channel)
+    if message and random.random() < 0.3:  # 30% chance to send after generation
+        try:
+            await channel.send(message)
+            await self.memory.add_message(
+                channel.id, "Heidi", message, True
+            )
+            log.info(f"💬 Spontaneous message sent in {channel.name} ({channel.id}): '{message}'")
+        except discord.Forbidden:
+            log.warning(f"Missing permissions to send message in {channel.name}")
+        except Exception as e:
+            log.error(f"Failed to send spontaneous message in {channel.name}: {e}")
+    else:
+        if message:
+            log.debug(f"Generated message but skipped sending in {channel.name} due to random check")
+        else:
+            log.debug(f"No message generated for {channel.name}")
         if engaged_channels > 0:
             log.info(f"Successfully engaged in {engaged_channels} channels")
 
