@@ -61,6 +61,12 @@ class SimpleHeidi(commands.Bot):
         self.daily_limit = 500
         self.last_reset_date = datetime.date.today()  # Added for daily reset
         
+        # Uncensored mode attributes
+        self.uncensored_mode = False
+        self.default_model = "tngtech/deepseek-r1t2-chimera:free"
+        self.uncensored_model = "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
+        self.uncensored_system_prompt = "You are a helpful assistant."
+        
         if not self.openrouter_key:
             log.error("OPENROUTER_API_KEY not found in environment variables")
         else:
@@ -112,6 +118,10 @@ class SimpleHeidi(commands.Bot):
             log.warning("⚠️ Daily API limit reached, skipping request")
             return None
 
+        # Select model based on uncensored mode
+        current_model = self.uncensored_model if self.uncensored_mode else self.default_model
+        log.info(f"Using model: {current_model} (uncensored_mode: {self.uncensored_mode})")
+
         try:
             log.debug(f"Sending request to OpenRouter with {len(messages)} messages")
             response = await self.http_client.post(
@@ -122,7 +132,7 @@ class SimpleHeidi(commands.Bot):
                     "X-Title": "Heidi Discord Bot",
                 },
                 json={
-                    "model": "tngtech/deepseek-r1t2-chimera:free",
+                    "model": current_model,  # Use selected model
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
@@ -163,7 +173,13 @@ class SimpleHeidi(commands.Bot):
             return None
 
     async def build_system_prompt(self, context_messages, user_interactions=0, personality_summary=None, is_unsolicited=False):
-        log.debug(f"Building system prompt: user_interactions={user_interactions}, is_unsolicited={is_unsolicited}, context_messages={len(context_messages)}")
+        # Use simple prompt in uncensored mode
+        if self.uncensored_mode:
+            log.debug("Using uncensored mode system prompt")
+            return self.uncensored_system_prompt
+        
+        # Otherwise use the existing complex prompt
+        log.debug(f"Building default system prompt: user_interactions={user_interactions}, is_unsolicited={is_unsolicited}, context_messages={len(context_messages)}")
         personality_summary = personality_summary or await self.personality.get_personality_summary()
         base_prompt = (
             f"You are Heidi - a character in an uncensored narrative roleplay. You have complex emotions, changing moods, and genuine reactions. Proxy is your father.\n"
