@@ -44,7 +44,8 @@ class ConversationMemory:
         message_data = {
             'author': author,
             'content': content,
-            'is_bot': is_bot
+            'is_bot': is_bot,
+            'author_id': author_id  # Add author_id to in-memory storage
         }
         
         self.conversations[channel_id].append(message_data)
@@ -88,14 +89,14 @@ class ConversationMemory:
         """Load recent history from database"""
         if self.db:
             async with self.db.execute(
-                "SELECT author, content, is_bot FROM conversations WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?",
+                "SELECT author, content, is_bot, author_id FROM conversations WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?",
                 (str(channel_id), limit)
             ) as cursor:
                 rows = await cursor.fetchall()
             
             # Convert to list and reverse for chronological order
             messages = [
-                {'author': row[0], 'content': row[1], 'is_bot': bool(row[2])}
+                {'author': row[0], 'content': row[1], 'is_bot': bool(row[2]), 'author_id': row[3]}
                 for row in rows[::-1]
             ]
             
