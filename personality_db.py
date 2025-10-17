@@ -42,7 +42,7 @@ class PersonalityDB:
         await cursor.close()
 
         if count == 0:
-            default_personality = "curious, playful, friendly, tech-savvy, anime fan"
+            default_personality = "emotionally complex, moody, sarcastic, empathetic, unpredictable, introspective, easily distracted"
             insert_sql = "INSERT INTO personality (id, summary) VALUES (1, ?)"
             await self.db.execute(insert_sql, (default_personality,))
             await self.db.commit()
