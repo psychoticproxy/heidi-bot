@@ -68,7 +68,7 @@ class EngagementEngine:
                 f"and the conversation context, update her personality summary.\n"
                 f"Current personality: {current_personality}\n\n"
                 f"Provide ONLY the updated personality summary as a brief comma-separated list of traits. "
-                f"Keep it concise (max 100 characters). Focus on making her more engaging, entertaining, natural, and sincere."
+                f"Keep it concise (max 100 characters). Focus on making her feel like a real person with depth, contradictions, and authentic emotions."
             )
             
             messages = [
