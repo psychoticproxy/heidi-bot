@@ -156,3 +156,17 @@ def setup_legacy_commands(bot):
             except Exception as e:
                 logger.error(f"Error in summarize command: {e}")
                 await ctx.send("❌ An error occurred while trying to summarize messages. Please try again later.")
+
+    @bot.command(name="uncensored")
+    async def uncensored(ctx, mode: str):
+        """Switch between censored and uncensored modes."""
+        logger.info(f"Uncensored command used by {ctx.author} with mode: {mode}")
+        
+        if mode.lower() == "on":
+            ctx.bot.uncensored_mode = True
+            await ctx.send("✅ Uncensored mode enabled. Using dolphin-mistral model with simple system prompt.")
+        elif mode.lower() == "off":
+            ctx.bot.uncensored_mode = False
+            await ctx.send("✅ Uncensored mode disabled. Using default model with personality system.")
+        else:
+            await ctx.send("❌ Please use `!uncensored on` or `!uncensored off`")
