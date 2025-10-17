@@ -122,7 +122,7 @@ class SimpleHeidi(commands.Bot):
                     "X-Title": "Heidi Discord Bot",
                 },
                 json={
-                    "model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+                    "model": "tngtech/deepseek-r1t2-chimera:free",
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
