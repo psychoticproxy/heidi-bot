@@ -12,6 +12,11 @@ class EngagementEngine:
         logger.info("EngagementEngine initialized")
         
     async def should_engage(self, channel_id):
+        # Don't engage if in uncensored mode
+        if self.bot.uncensored_mode:
+            logger.debug(f"Channel {channel_id} - Skipping engagement (uncensored mode active)")
+            return False
+            
         last_active = self.last_activity.get(channel_id, 0)
         current_time = asyncio.get_event_loop().time()
         time_since_active = current_time - last_active
@@ -24,6 +29,11 @@ class EngagementEngine:
         logger.debug(f"Updated activity for channel {channel_id}")
         
     async def spontaneous_message(self, channel):
+        # Return immediately if in uncensored mode
+        if self.bot.uncensored_mode:
+            logger.debug(f"Skipping spontaneous message in channel {channel.id} (uncensored mode active)")
+            return None
+            
         logger.debug(f"Checking spontaneous message for channel {channel.id} ({channel.name})")
         if not await self.should_engage(channel.id):
             logger.debug(f"Channel {channel.id} not active enough for spontaneous message")
@@ -31,14 +41,19 @@ class EngagementEngine:
 
         context = await self.memory.get_recent_context(channel.id, limit=6)
         
-        # Get current personality for the system prompt
-        current_personality = await self.bot.personality.get_personality_summary()
-        
-        system_prompt = await self.bot.build_system_prompt(
-            context,
-            personality_summary=current_personality,
-            is_unsolicited=True
-        )
+        # Use simple prompt in uncensored mode
+        if self.bot.uncensored_mode:
+            system_prompt = self.bot.uncensored_system_prompt
+            logger.debug("Using uncensored mode system prompt for spontaneous message")
+        else:
+            # Get current personality for the system prompt
+            current_personality = await self.bot.personality.get_personality_summary()
+            system_prompt = await self.bot.build_system_prompt(
+                context,
+                personality_summary=current_personality,
+                is_unsolicited=True
+            )
+            logger.debug("Using default personality system prompt for spontaneous message")
         
         user_prompt = "As a real human participant, join this Discord conversation naturally. React genuinely to what's being discussed. Show authentic human behavior - be curious, confused, excited, or share a random thought. Don't force relevance, just be a person joining a chat."
         
