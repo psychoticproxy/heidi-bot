@@ -40,7 +40,7 @@ class EngagementEngine:
             is_unsolicited=True
         )
         
-        user_prompt = "Generate a brief, spontaneous message to join this Discord conversation naturally. Be casual and relevant, as if Heidi is chiming in."
+        user_prompt = "As a real human participant, join this Discord conversation naturally. React genuinely to what's being discussed. Show authentic human behavior - be curious, confused, excited, or share a random thought. Don't force relevance, just be a person joining a chat."
         
         messages = [
             {"role": "system", "content": system_prompt},
