@@ -192,7 +192,7 @@ class SimpleHeidi(commands.Bot):
         log.info("Starting background engagement task")
         await self.wait_until_ready()
         while not self.is_closed():
-            sleep_time = random.randint(900, 1800)
+            sleep_time = random.randint(1800, 3600)
             log.debug(f"Background engagement sleeping for {sleep_time}s")
             await asyncio.sleep(sleep_time)
             await self.try_spontaneous_engagement()
@@ -216,7 +216,7 @@ class SimpleHeidi(commands.Bot):
         
         # Generate the spontaneous message (this makes an API call)
         message = await self.engagement.spontaneous_message(channel)
-        if message and random.random() < 0.3:  # 30% chance to send after generation
+        if message and random.random() < 0.15:  # 15% chance to send after generation
             try:
                 await channel.send(message)
                 await self.memory.add_message(
@@ -253,7 +253,7 @@ class SimpleHeidi(commands.Bot):
         if self.user in message.mentions:
             log.info(f"Bot mentioned by {message.author}")
             await self.respond_to_mention(message)
-        elif random.random() < 0.03:
+        elif random.random() < 0.15:
             log.debug("Random unsolicited participation check")
             await self.unsolicited_participation(message)
 
