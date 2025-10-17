@@ -55,7 +55,13 @@ class EngagementEngine:
             )
             logger.debug("Using default personality system prompt for spontaneous message")
         
-        user_prompt = "As a real human participant, join this Discord conversation naturally. React genuinely to what's being discussed. Show authentic human behavior - be curious, confused, excited, or share a random thought. Don't force relevance, just be a person joining a chat."
+        # Enhanced user prompt with mention instruction
+        user_prompt = (
+            "As a real human participant, join this Discord conversation naturally. "
+            "When mentioning users, use Discord's mention format with their user ID (e.g., <@1248244979151671398>). "
+            "React genuinely to what's being discussed. Show authentic human behavior - be curious, confused, excited, or share a random thought. "
+            "Don't force relevance, just be a person joining a chat."
+        )
         
         messages = [
             {"role": "system", "content": system_prompt},
