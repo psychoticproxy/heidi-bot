@@ -15,8 +15,8 @@ if __name__ == "__main__":
         log.error("❌ DISCORD_BOT_TOKEN not found")
         exit(1)
     
-    # Start health check server (for Koyeb monitoring)
-    start_health_server()
+    # Start health check server on port 8000 (Koyeb default)
+    start_health_server(port=8000)
     
     bot = SimpleHeidi()
     bot.run(token)
