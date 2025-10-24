@@ -1,29 +1,19 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 class Config:
-    # Discord
-    DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    # Discord and API settings
+    DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    COMMAND_PREFIX = "!"
+    DAILY_API_LIMIT = 100
+    DEFAULT_MODEL = "tngtech/deepseek-r1t2-chimera:free"
+    UNCENSORED_MODEL = "https://openrouter.ai/cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
+    DEFAULT_TEMPERATURE = 0.7
     
-    # Database
+    # Database configuration (PostgreSQL)
     DATABASE_HOST = os.getenv("DATABASE_HOST", "localhost")
     DATABASE_USER = os.getenv("DATABASE_USER", "postgres")
     DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD", "")
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "heidi_bot")
-    
-    # OpenRouter
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    DEFAULT_MODEL = "tngtech/deepseek-r1t2-chimera:free"
-    UNCENSORED_MODEL = "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
-    
-    # Bot Settings
-    COMMAND_PREFIX = "!"
-    DAILY_API_LIMIT = 1000
-    MAX_MEMORY_CONTEXT = 20
-    
-    # Personality
-    DEFAULT_PERSONALITY = "Heidi is emotionally complex, moody, sarcastic, empathetic and unpredictable."
-    DEFAULT_TEMPERATURE = 0.7
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "heidi")
+    DATABASE_PORT = int(os.getenv("DATABASE_PORT", 5432))
 
