@@ -37,6 +37,7 @@ class BasicCommands(commands.Cog):
             ("!ping", "Check bot latency"),
             ("!usage", "Check API usage"),
             ("!personality", "Show current personality"),
+            ("!setpersonality [text]", "Set bot's personality (Admin only)"),
             ("!memory", "Show memory stats"),
             ("!sacrifice", "Manual sacrifice (Admin)"),
             ("!autosacrifice on/off", "Toggle auto-sacrifice (Admin)"),
