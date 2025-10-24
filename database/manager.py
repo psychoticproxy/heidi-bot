@@ -69,7 +69,6 @@ class DatabaseManager:
         except Exception as e:
             log.error(f"❌ Table creation failed: {e}")
     
-    # ADD THESE MISSING METHODS
     async def execute(self, query, *args):
         """Execute a query"""
         if not self.conn:
@@ -93,4 +92,24 @@ class DatabaseManager:
         if self.conn:
             await self.conn.close()
             log.info("✅ Database connection closed")
+
+    async def init(self):
+        try:
+            # Add pool configuration
+            self.pool = await asyncpg.create_pool(
+                host=Config.DATABASE_HOST,
+                user=Config.DATABASE_USER,
+                password=Config.DATABASE_PASSWORD,
+                database=Config.DATABASE_NAME,
+                port=Config.DATABASE_PORT,
+                min_size=1,
+                max_size=4
+            )
+            await self.create_tables()
+            log.info("✅ Database connected and tables ready")
+            return True
+        except Exception as e:
+            log.error(f"❌ Database connection failed: {e}")
+            return False
+
 
