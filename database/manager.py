@@ -23,7 +23,6 @@ class DatabaseManager:
             return True
         except Exception as e:
             log.error(f"❌ Database connection failed: {e}")
-            # Don't crash - bot can run without database
             self.conn = None
             return False
     
@@ -53,10 +52,41 @@ class DatabaseManager:
                 )
             ''')
             
+            # Conversations table (for message history)
+            await self.conn.execute('''
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id SERIAL PRIMARY KEY,
+                    channel_id TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    author_id TEXT,
+                    content TEXT NOT NULL,
+                    is_bot BOOLEAN DEFAULT FALSE,
+                    timestamp TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            
             log.info("✅ Database tables created/verified")
         except Exception as e:
             log.error(f"❌ Table creation failed: {e}")
-            # Don't crash - bot can run without proper tables
+    
+    # ADD THESE MISSING METHODS
+    async def execute(self, query, *args):
+        """Execute a query"""
+        if not self.conn:
+            raise Exception("Database not connected")
+        return await self.conn.execute(query, *args)
+    
+    async def fetch(self, query, *args):
+        """Fetch rows from a query"""
+        if not self.conn:
+            raise Exception("Database not connected")
+        return await self.conn.fetch(query, *args)
+    
+    async def fetchval(self, query, *args):
+        """Fetch a single value from a query"""
+        if not self.conn:
+            raise Exception("Database not connected")
+        return await self.conn.fetchval(query, *args)
     
     async def close(self):
         """Close database connection"""

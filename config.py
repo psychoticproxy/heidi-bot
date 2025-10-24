@@ -8,11 +8,10 @@ class Config:
     DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
     
     # Database
-    DB_HOST = os.getenv("DATABASE_HOST")
-    DB_USER = os.getenv("DATABASE_USER")
-    DB_PASSWORD = os.getenv("DATABASE_PASSWORD")
-    DB_NAME = os.getenv("DATABASE_NAME")
-    DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}"
+    DATABASE_HOST = os.getenv("DATABASE_HOST", "localhost")
+    DATABASE_USER = os.getenv("DATABASE_USER", "postgres")
+    DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD", "")
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "heidi_bot")
     
     # OpenRouter
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -25,6 +24,6 @@ class Config:
     MAX_MEMORY_CONTEXT = 20
     
     # Personality
-    DEFAULT_PERSONALITY = "emotionally complex, moody, sarcastic, empathetic, unpredictable"
+    DEFAULT_PERSONALITY = "Heidi is emotionally complex, moody, sarcastic, empathetic and unpredictable."
     DEFAULT_TEMPERATURE = 0.7
 
