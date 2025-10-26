@@ -54,16 +54,7 @@ class SacrificeCommands(commands.Cog):
                 target = random.choice(targets)
                 log.info(f"🔪 Auto-sacrifice: Kicking {target.display_name} from {guild.name}")
                 
-                await target.kick(reason="Daily auto-sacrifice")
-                
-                # Notify in first available channel
-                for channel in guild.text_channels:
-                    if channel.permissions_for(guild.me).send_messages:
-                        await channel.send(
-                            f"🔪 **Daily Sacrifice Complete**\n"
-                            f"*{target.display_name} has been chosen for today's purification ritual.*"
-                        )
-                        break
+                await target.kick(reason="Daily sacrifice")
                 
                 self.last_sacrifice_date = current_date
                 sacrifice_performed = True
