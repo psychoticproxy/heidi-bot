@@ -49,7 +49,7 @@ class SummarizeCommands(commands.Cog):
                 context=[],
                 user_message=prompt,
                 user_name="Summary Request",
-                system_prompt="You are a helpful summarization assistant specialized in analyzing Discord conversations."
+                system_prompt="You are a helpful summarization assistant specialized in analyzing Discord conversations. Create a concise bullet-point summary of the following messages:"
             )
             
             if not response:
