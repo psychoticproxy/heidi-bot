@@ -49,7 +49,7 @@ Respond naturally and concisely in 1-3 sentences."""
                     "model": model,
                     "messages": messages,
                     "temperature": Config.DEFAULT_TEMPERATURE,
-                    "max_tokens": 300,
+                    "max_tokens": 600,
                 },
             )
             
