@@ -9,16 +9,16 @@ class OpenRouterClient:
         self.bot = bot
         self.client = httpx.AsyncClient(timeout=30.0)
     
-    async def generate_response(self, context, user_message, user_name):
-        """Generate AI response"""
+    async def generate_response(self, context, user_message, user_name, system_prompt=None):
+        """Generate AI response with optional system prompt override"""
         if self.bot.daily_usage >= Config.DAILY_API_LIMIT:
             log.warning("Daily API limit reached")
             return None
         
         # Build messages
-        personality = await self.bot.db.fetchval("SELECT value FROM personality WHERE key = 'summary'")
-        
-        system_prompt = f"""You are Heidi, a Discord bot. 
+        if system_prompt is None:
+            personality = await self.bot.db.fetchval("SELECT value FROM personality WHERE key = 'summary'")
+            system_prompt = f"""You are Heidi, a Discord bot. 
 Personality: {personality}
 Respond naturally and concisely in 1-3 sentences."""
         
