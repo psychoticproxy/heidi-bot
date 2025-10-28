@@ -42,6 +42,7 @@ class SimpleHeidi(commands.Bot):
         await self.load_extension("cogs.personality")
         await self.load_extension("cogs.sacrifice")  # This starts the background task
         await self.load_extension("cogs.memory")
+        await self.load_extension("cogs.summarize")
         
         log.info("✅ Bot setup complete!")
     
