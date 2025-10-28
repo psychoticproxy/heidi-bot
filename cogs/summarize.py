@@ -70,6 +70,8 @@ class SummarizeCommands(commands.Cog):
                         summary_content = response[:last_period+1] + " [...]"
                     else:
                         summary_content = response[:1900] + "..."
+                        
+                summary = f"**📝 Summary of last {len(messages)} messages**\n{summary_content}"
                 await ctx.send(summary)
                 
                 # Update cooldown only if non-admin
