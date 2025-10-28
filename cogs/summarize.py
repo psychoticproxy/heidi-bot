@@ -43,8 +43,7 @@ class SummarizeCommands(commands.Cog):
         
             # Build summary prompt
             conversation = "\n".join([f"{m['author']}: {m['content']}" for m in messages])
-            prompt = f"Create a concise bullet-point summary of this conversation:\n\n{conversation[-6000:]}"  # Truncate to avoid token limits
-
+            prompt = f"Create a concise bullet-point summary focusing on key topics and interactions:\n\n{conversation[-8000:]}"
 
             # Log the API call parameters
             log.debug(f"Calling API with system_prompt and prompt length: {len(prompt)}")
@@ -54,13 +53,23 @@ class SummarizeCommands(commands.Cog):
                 context=[],
                 user_message=prompt,
                 user_name="Summary Request",
-                system_prompt="You are a helpful summarization assistant specialized in analyzing Discord conversations. Create a concise bullet-point summary of the following messages:"
+                system_prompt="""You're a professional summarization AI. For the given Discord chat:
+                1. Create bullet points with clear topic headings
+                2. Keep each bullet 1-2 sentences
+                3. Never truncate mid-sentence
+                4. Focus on recurring themes and key interactions"""
             )
             
             
             # Send results
             if response:
-                summary = f"**📝 Summary of last {len(messages)} messages**\n{response[:2000]}"
+                summary_content = response
+                if len(response) > 1900:
+                    last_period = response[:1900].rfind('. ')
+                    if last_period != -1:
+                        summary_content = response[:last_period+1] + " [...]"
+                    else:
+                        summary_content = response[:1900] + "..."
                 await ctx.send(summary)
                 
                 # Update cooldown only if non-admin
