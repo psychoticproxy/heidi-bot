@@ -6,7 +6,7 @@ class Config:
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     COMMAND_PREFIX = "!"
     DAILY_API_LIMIT = 500
-    DEFAULT_MODEL = "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
+    DEFAULT_MODEL = "tngtech/deepseek-r1t2-chimera:free"
     DEFAULT_TEMPERATURE = 0.7
     
     # Database configuration (PostgreSQL)
