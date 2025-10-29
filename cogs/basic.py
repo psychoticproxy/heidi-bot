@@ -39,6 +39,7 @@ class BasicCommands(commands.Cog):
             ("!personality", "Show current personality"),
             ("!setpersonality [text]", "Set bot's personality (Admin only)"),
             ("!memory", "Show memory stats"),
+            ("!summary [mention]", "Summarize the channel or a user"),
             ("!sacrifice", "Manual sacrifice (Admin)"),
             ("!autosacrifice on/off", "Toggle auto-sacrifice (Admin)"),
             ("!sacrificetime [hour]", "Set sacrifice time 0-23 UTC (Admin)"),
