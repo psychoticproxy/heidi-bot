@@ -44,6 +44,8 @@ class BasicCommands(commands.Cog):
             ("!autosacrifice on/off", "Toggle auto-sacrifice (Admin)"),
             ("!sacrificetime [hour]", "Set sacrifice time 0-23 UTC (Admin)"),
             ("!sacrificestatus", "Check sacrifice status"),
+            ("!model", "Show current AI model"),
+            ("!setmodel [model]", "Change AI model (Admin)"),
             ("!help", "This message")
         ]
         
