@@ -14,8 +14,6 @@ class OpenRouterClient:
         if self.bot.daily_usage >= Config.DAILY_API_LIMIT:
             log.warning("Daily API limit reached")
             return None
-
-        model = self.bot.current_model
         
         # Build messages
         if system_prompt is None:
