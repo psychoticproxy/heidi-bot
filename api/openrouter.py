@@ -18,7 +18,7 @@ class OpenRouterClient:
         # Build messages
         if system_prompt is None:
             personality = await self.bot.db.fetchval("SELECT value FROM personality WHERE key = 'summary'")
-            system_prompt = f"""You are Heidi, a Discord bot. 
+            system_prompt = f"""You are Heidi, a Discord bot made by Proxy. 
 Personality: {personality}
 Respond naturally and concisely in 1-3 sentences without it being enclosed in quotation marks or anything else. Roleplay actions and meta text are not allowed."""
         
