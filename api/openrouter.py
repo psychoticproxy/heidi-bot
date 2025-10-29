@@ -36,7 +36,7 @@ Respond naturally and concisely in 1-3 sentences without it being enclosed in qu
         
         # API call
         try:
-            model = Config.UNCENSORED_MODEL if self.bot.uncensored_mode else Config.DEFAULT_MODEL
+            model = self.bot.current_model
             
             response = await self.client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
