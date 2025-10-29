@@ -5,7 +5,7 @@ class Config:
     DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     COMMAND_PREFIX = "!"
-    DAILY_API_LIMIT = 100
+    DAILY_API_LIMIT = 500
     DEFAULT_MODEL = "cognitivecomputations/dolphin-mistral-24b-venice-edition:free"
     DEFAULT_TEMPERATURE = 0.7
     
