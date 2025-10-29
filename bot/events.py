@@ -56,5 +56,5 @@ async def handle_mention(bot, message):
                 is_bot=True
             )
         else:
-            await message.reply("🤖 *beep boop* (I'm having trouble responding right now)", mention_author=False)
+            await message.reply("https://tenor.com/view/bocchi-the-rock-bocchi-roll-rolling-rolling-on-the-floor-gif-4645200487976536632", mention_author=False)
 
