@@ -26,7 +26,6 @@ class SimpleHeidi(commands.Bot):
         
         # Simple state
         self.daily_usage = 0
-        self.uncensored_mode = False
         
         setup_events(self)
     
