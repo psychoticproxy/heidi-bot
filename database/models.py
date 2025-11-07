@@ -80,3 +80,24 @@ async def update_personality(db, new_summary):
         except Exception as e:
             log.warning(f"⚠️ Failed to update personality in database: {e}")
 
+async def get_message_history(db, channel_id, user_id=None, limit=500):
+    """Get message history for a channel (optionally filtered by user)"""
+    query = """
+        SELECT author, content FROM conversations
+        WHERE channel_id = $1
+        AND (author_id = $2 OR $2 IS NULL)
+        ORDER BY timestamp DESC
+        LIMIT $3
+    """
+    if db and hasattr(db, 'fetch'):
+        try:
+            rows = await db.fetch(
+                query,
+                str(channel_id),
+                str(user_id) if user_id else None,
+                limit
+            )
+            return rows[::-1]  # Return in chronological order
+        except Exception as e:
+            log.warning(f"⚠️ Failed to fetch message history: {e}")
+    return []

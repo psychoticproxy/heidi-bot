@@ -9,18 +9,18 @@ class OpenRouterClient:
         self.bot = bot
         self.client = httpx.AsyncClient(timeout=30.0)
     
-    async def generate_response(self, context, user_message, user_name):
-        """Generate AI response"""
+    async def generate_response(self, context, user_message, user_name, system_prompt=None):
+        """Generate AI response with optional system prompt override"""
         if self.bot.daily_usage >= Config.DAILY_API_LIMIT:
             log.warning("Daily API limit reached")
             return None
         
         # Build messages
-        personality = await self.bot.db.fetchval("SELECT value FROM personality WHERE key = 'summary'")
-        
-        system_prompt = f"""You are Heidi, a Discord bot. 
+        if system_prompt is None:
+            personality = await self.bot.db.fetchval("SELECT value FROM personality WHERE key = 'summary'")
+            system_prompt = f"""You are Heidi, a Discord bot made by Proxy. 
 Personality: {personality}
-Respond naturally and concisely in 1-3 sentences."""
+Respond naturally and concisely in 1-3 sentences without it being enclosed in quotation marks or anything else. Roleplay actions and meta text are not allowed."""
         
         # Build conversation context
         conversation_text = "\n".join([
@@ -36,7 +36,7 @@ Respond naturally and concisely in 1-3 sentences."""
         
         # API call
         try:
-            model = Config.UNCENSORED_MODEL if self.bot.uncensored_mode else Config.DEFAULT_MODEL
+            model = self.bot.current_model
             
             response = await self.client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -49,7 +49,7 @@ Respond naturally and concisely in 1-3 sentences."""
                     "model": model,
                     "messages": messages,
                     "temperature": Config.DEFAULT_TEMPERATURE,
-                    "max_tokens": 300,
+                    "max_tokens": 600,
                 },
             )
             

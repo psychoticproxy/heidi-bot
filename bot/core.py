@@ -14,6 +14,7 @@ class SimpleHeidi(commands.Bot):
         intents.message_content = True
         intents.members = True
         
+        
         super().__init__(
             command_prefix=Config.COMMAND_PREFIX,
             intents=intents,
@@ -23,10 +24,10 @@ class SimpleHeidi(commands.Bot):
         self.config = Config
         self.db = DatabaseManager()
         self.api = OpenRouterClient(self)
+        self.current_model = Config.DEFAULT_MODEL
         
         # Simple state
         self.daily_usage = 0
-        self.uncensored_mode = False
         
         setup_events(self)
     
@@ -36,12 +37,26 @@ class SimpleHeidi(commands.Bot):
         
         # Initialize database
         await self.db.init()
+
+        # Load model setting after DB initialization
+        if self.db.pool:
+            try:
+                stored_model = await self.db.fetchval(
+                    "SELECT value FROM personality WHERE key = 'current_model'"
+                )
+                if stored_model:
+                    self.current_model = stored_model
+                    log.info(f"Loaded stored model: {stored_model}")
+            except Exception as e:
+                log.error(f"Error loading stored model: {e}")
         
         # Load cogs
         await self.load_extension("cogs.basic")
         await self.load_extension("cogs.personality")
-        await self.load_extension("cogs.sacrifice")  # This starts the background task
+        await self.load_extension("cogs.sacrifice")
         await self.load_extension("cogs.memory")
+        await self.load_extension("cogs.summarize")
+        await self.load_extension("cogs.model")
         
         log.info("✅ Bot setup complete!")
     
