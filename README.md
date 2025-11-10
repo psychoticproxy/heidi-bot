@@ -161,9 +161,9 @@ The bot tracks daily API usage and will stop responding if limits are reached. U
 - Bot needs `Kick Members` permission
 - Target members must have no roles (except @everyone)
 
-## 📄 License
+## License
 
-Unlicense License - feel free to modify and distribute.
+GNU General Public License - Everyone is permitted to copy and distribute verbatim copies of this license document, but changing it is not allowed.
 
 ---
 
