@@ -22,10 +22,11 @@ class ModelCommands(commands.Cog):
             if '/' not in model_name:
                 await ctx.send("❌ Invalid model format. Use `provider/model:tag`")
                 return
-            
+
+            # Use SQLite upsert syntax and parameter style
             await self.bot.db.execute(
-                "INSERT INTO personality (key, value) VALUES ('current_model', $1) "
-                "ON CONFLICT (key) DO UPDATE SET value = $1",
+                "INSERT INTO personality (key, value) VALUES ('current_model', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 model_name
             )
             self.bot.current_model = model_name
