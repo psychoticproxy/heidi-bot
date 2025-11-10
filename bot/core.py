@@ -57,6 +57,7 @@ class SimpleHeidi(commands.Bot):
         await self.load_extension("cogs.memory")
         await self.load_extension("cogs.summarize")
         await self.load_extension("cogs.model")
+        await self.load_extension("cogs.dbadmin")
         
         log.info("✅ Bot setup complete!")
     
