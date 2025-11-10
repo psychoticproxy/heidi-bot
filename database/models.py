@@ -11,19 +11,19 @@ async def add_message(db, channel_id, author, content, author_id=None, is_bot=Fa
     # Add to cache first (always works)
     if channel_id not in conversation_cache:
         conversation_cache[channel_id] = deque(maxlen=20)
-    
+
     conversation_cache[channel_id].append({
         'author': author,
         'content': content,
         'is_bot': is_bot
     })
-    
+
     # Try to add to database if available
     if db and hasattr(db, 'execute'):
         try:
             await db.execute(
-                "INSERT INTO conversations (channel_id, author, author_id, content, is_bot) VALUES ($1, $2, $3, $4, $5)",
-                str(channel_id), author, str(author_id) if author_id else None, content, is_bot
+                "INSERT INTO conversations (channel_id, author, author_id, content, is_bot) VALUES (?, ?, ?, ?, ?)",
+                str(channel_id), author, str(author_id) if author_id else None, content, int(bool(is_bot))
             )
         except Exception as e:
             log.warning(f"⚠️ Failed to save message to database: {e}")
@@ -35,29 +35,30 @@ async def get_recent_context(db, channel_id, limit=10):
     if channel_id in conversation_cache:
         cache_list = list(conversation_cache[channel_id])
         return cache_list[-limit:] if len(cache_list) >= limit else cache_list
-    
+
     # Fallback to database if available
     if db and hasattr(db, 'fetch'):
         try:
             rows = await db.fetch(
-                "SELECT author, content, is_bot FROM conversations WHERE channel_id = $1 ORDER BY timestamp DESC LIMIT $2",
+                "SELECT author, content, is_bot FROM conversations WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?",
                 str(channel_id), limit
             )
-            
+
+            # rows are aiosqlite.Row objects; map to simple dicts and return in chronological order
             messages = [
-                {'author': row['author'], 'content': row['content'], 'is_bot': row['is_bot']}
-                for row in rows[::-1]  # Reverse to get chronological order
+                {'author': row['author'], 'content': row['content'], 'is_bot': bool(row['is_bot'])}
+                for row in rows[::-1]
             ]
-            
+
             # Update cache
             if channel_id not in conversation_cache:
                 conversation_cache[channel_id] = deque(maxlen=20)
             conversation_cache[channel_id].extend(messages)
-            
+
             return messages
         except Exception as e:
             log.warning(f"⚠️ Failed to fetch context from database: {e}")
-    
+
     return []  # Return empty if no database or cache
 
 async def get_personality(db):
@@ -73,8 +74,10 @@ async def update_personality(db, new_summary):
     """Update personality summary"""
     if db and hasattr(db, 'execute'):
         try:
+            # SQLite upsert (uses excluded.*)
             await db.execute(
-                "INSERT INTO personality (key, value) VALUES ('summary', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
+                "INSERT INTO personality (key, value) VALUES ('summary', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 new_summary
             )
         except Exception as e:
@@ -84,10 +87,10 @@ async def get_message_history(db, channel_id, user_id=None, limit=500):
     """Get message history for a channel (optionally filtered by user)"""
     query = """
         SELECT author, content FROM conversations
-        WHERE channel_id = $1
-        AND (author_id = $2 OR $2 IS NULL)
+        WHERE channel_id = ?
+        AND (author_id = ? OR ? IS NULL)
         ORDER BY timestamp DESC
-        LIMIT $3
+        LIMIT ?
     """
     if db and hasattr(db, 'fetch'):
         try:
@@ -95,9 +98,12 @@ async def get_message_history(db, channel_id, user_id=None, limit=500):
                 query,
                 str(channel_id),
                 str(user_id) if user_id else None,
+                str(user_id) if user_id else None,
                 limit
             )
-            return rows[::-1]  # Return in chronological order
+            # map to simple list of dicts in chronological order
+            messages = [{'author': row['author'], 'content': row['content']} for row in rows[::-1]]
+            return messages
         except Exception as e:
             log.warning(f"⚠️ Failed to fetch message history: {e}")
     return []
